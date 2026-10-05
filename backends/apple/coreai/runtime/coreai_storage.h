@@ -40,9 +40,11 @@ runtime::Result<NSArray<NSString*>*> storage_children(
     int fd,
     bool skip_invalid_names = false);
 // The caller holds the key's lock. Missing staging is already removed.
-runtime::Error remove_storage_staging(int root_fd, NSString* key);
+// With remove=false, only preflight the keyed tree without modifying it.
+runtime::Error remove_storage_staging(
+    int root_fd, NSString* key, bool remove = true);
 // Removes a keyed child of source_root_fd under the same lock requirement.
-runtime::Error remove_storage_source(int source_root_fd, NSString* key);
+runtime::Error remove_storage_source(int source_root_fd, NSString* key, bool remove = true);
 
 enum class StorageOperation {
   Write,

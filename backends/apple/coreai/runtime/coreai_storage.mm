@@ -342,7 +342,7 @@ bool storage_key(NSString* key) {
 }
 } // namespace
 
-Error remove_storage_staging(int root_fd, NSString* key) {
+Error remove_storage_staging(int root_fd, NSString* key, bool remove) {
   ET_CHECK_OR_RETURN_ERROR(
       storage_key(key), InvalidArgument, "Invalid Core AI staging key");
   FileDescriptor staging(retry_eintr([&] {
@@ -355,10 +355,10 @@ Error remove_storage_staging(int root_fd, NSString* key) {
       staging.get() >= 0,
       AccessFailed,
       "Cannot open Core AI staging directory");
-  return remove_storage_source(staging.get(), key);
+  return remove_storage_source(staging.get(), key, remove);
 }
 
-Error remove_storage_source(int source_root_fd, NSString* key) {
+Error remove_storage_source(int source_root_fd, NSString* key, bool remove) {
   ET_CHECK_OR_RETURN_ERROR(
       storage_key(key), InvalidArgument, "Invalid Core AI staging key");
   struct stat info;
@@ -390,6 +390,7 @@ Error remove_storage_source(int source_root_fd, NSString* key) {
       AccessFailed,
       "Cannot open Core AI keyed staging directory");
   ET_CHECK_OK_OR_RETURN_ERROR(visit_source_tree(source.get(), false));
+  if (!remove) return Error::Ok;
   ET_CHECK_OK_OR_RETURN_ERROR(visit_source_tree(source.get(), true));
   ET_CHECK_OR_RETURN_ERROR(
       storage_call(
