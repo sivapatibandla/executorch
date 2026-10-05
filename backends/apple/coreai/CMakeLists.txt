@@ -34,7 +34,9 @@ if(EXECUTORCH_BUILD_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     runtime/test/coreai_manifest_test.mm
     runtime/test/coreai_storage_test.mm
     runtime/test/coreai_filesystem_fixture.mm
+    runtime/test/coreai_source_test.mm
     runtime/test/coreai_bookmark_test.mm
+    runtime/test/coreai_source_fixture.mm
     runtime/test/coreai_bookmark_fixture.mm
     ${_coreai_runtime_sources}
   )
