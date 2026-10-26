@@ -12,6 +12,7 @@
 #include <cstdint>
 
 #include <c10/util/safe_numerics.h>
+#include <executorch/runtime/core/device_allocator.h>
 #include <executorch/runtime/core/event_tracer_hooks.h>
 #include <executorch/runtime/executor/memory_manager.h>
 #include <executorch/runtime/executor/method.h>
@@ -634,10 +635,14 @@ Result<FreeableBuffer> Program::LoadSegment(
       static_cast<size_t>(absolute_offset), segment->size(), segment_info);
 }
 
-Result<Program::MutableSubsegment> Program::locate_mutable_subsegment(
+Error Program::load_mutable_subsegment_into(
     size_t mutable_data_segments_index,
     size_t offset_index,
-    size_t size) const {
+    size_t size,
+    void* buffer,
+    DeviceAllocator* device_allocator,
+    etensor::DeviceIndex device_index) const {
+  EXECUTORCH_SCOPE_PROF("Program::load_subsegment_into");
   // Check that the program has segments.
   if (loader_ == nullptr || segment_base_offset_ == 0) {
     ET_LOG(Error, "No segments in program");
@@ -742,34 +747,11 @@ Result<Program::MutableSubsegment> Program::locate_mutable_subsegment(
       "segment base+offset %zu + subsegment offset %zu overflows",
       base_plus_seg,
       offset);
-  return MutableSubsegment{total_offset, info};
-}
-
-Error Program::load_mutable_subsegment_into(
-    size_t mutable_data_segments_index,
-    size_t offset_index,
-    size_t size,
-    void* buffer) const {
-  EXECUTORCH_SCOPE_PROF("Program::load_subsegment_into");
-  Result<MutableSubsegment> subsegment = locate_mutable_subsegment(
-      mutable_data_segments_index, offset_index, size);
-  if (!subsegment.ok()) {
-    return subsegment.error();
+  if (device_allocator != nullptr) {
+    return device_allocator->load_segment_into(
+        *loader_, total_offset, size, info, buffer, device_index);
   }
-  return loader_->load_into(subsegment->offset, size, subsegment->info, buffer);
-}
-
-Result<FreeableBuffer> Program::load_mutable_subsegment(
-    size_t mutable_data_segments_index,
-    size_t offset_index,
-    size_t size) const {
-  EXECUTORCH_SCOPE_PROF("Program::load_mutable_subsegment");
-  Result<MutableSubsegment> subsegment = locate_mutable_subsegment(
-      mutable_data_segments_index, offset_index, size);
-  if (!subsegment.ok()) {
-    return subsegment.error();
-  }
-  return loader_->load(subsegment->offset, size, subsegment->info);
+  return loader_->load_into(total_offset, size, info, buffer);
 }
 
 } // namespace ET_RUNTIME_NAMESPACE

@@ -31,6 +31,10 @@ struct Program;
 } // namespace executorch_flatbuffer
 
 namespace executorch {
+namespace runtime {
+class DeviceAllocator;
+} // namespace runtime
+
 namespace ET_RUNTIME_NAMESPACE {
 namespace testing {
 // Provides test access to private Program methods.
@@ -269,6 +273,10 @@ class Program final {
    * @param[in] size The number of bytes to load.
    * @param[in] buffer The buffer to load data into. Must point to at least
    * `size` bytes of memory.
+   * @param[in] device_allocator When not null, `buffer` is device memory of
+   * this allocator, and the data is loaded through it.
+   * @param[in] device_index The device of `buffer` when `device_allocator` is
+   * not null.
    *
    * @returns An error code on if the load was successful.
    * @retval Error::Ok The load was successful.
@@ -277,39 +285,15 @@ class Program final {
    * @returns Other errors depending on the implementation of
    *     DataLoader: The Program.segment table is inconsistent, or the
    *     data cannot be accessed.
+   * @returns Other errors from `device_allocator` when it is not null.
    */
   ET_NODISCARD Error load_mutable_subsegment_into(
       size_t mutable_data_segments_index,
       size_t offset_index,
       size_t size,
-      void* buffer) const;
-
-  /**
-   * Loads a portion of a mutable segment into a new buffer, for a destination
-   * such as device memory that the data loader cannot write.
-   *
-   * Takes the same arguments as load_mutable_subsegment_into(), except the
-   * buffer, and fails in the same cases.
-   *
-   * @returns The data as a FreeableBuffer of `size` bytes.
-   */
-  ET_NODISCARD Result<FreeableBuffer> load_mutable_subsegment(
-      size_t mutable_data_segments_index,
-      size_t offset_index,
-      size_t size) const;
-
-  /// Where a mutable subsegment starts in the data loader's data, and the
-  /// segment info to load it with.
-  struct MutableSubsegment {
-    size_t offset;
-    DataLoader::SegmentInfo info;
-  };
-
-  /// Checks the indices and size of a mutable subsegment and locates it.
-  ET_NODISCARD Result<MutableSubsegment> locate_mutable_subsegment(
-      size_t mutable_data_segments_index,
-      size_t offset_index,
-      size_t size) const;
+      void* buffer,
+      DeviceAllocator* device_allocator,
+      etensor::DeviceIndex device_index) const;
 
  private:
   Program(

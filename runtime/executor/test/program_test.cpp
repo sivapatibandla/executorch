@@ -20,6 +20,7 @@
 #include <executorch/extension/data_loader/file_data_loader.h>
 #include <executorch/runtime/core/error.h>
 #include <executorch/runtime/core/result.h>
+#include <executorch/runtime/core/test/mock_cuda_allocator.h>
 #include <executorch/runtime/platform/runtime.h>
 #include <executorch/schema/program_generated.h>
 #include <executorch/test/utils/DeathTest.h>
@@ -32,6 +33,7 @@ using executorch::runtime::Error;
 using executorch::runtime::FreeableBuffer;
 using executorch::runtime::Program;
 using executorch::runtime::Result;
+using executorch::runtime::testing::MockCudaAllocator;
 using torch::executor::util::BufferDataLoader;
 using torch::executor::util::FileDataLoader;
 
@@ -106,18 +108,16 @@ class ProgramTestFriend final {
       size_t mutable_data_segments_index,
       size_t offset_index,
       size_t size,
-      void* buffer) {
+      void* buffer,
+      DeviceAllocator* device_allocator = nullptr,
+      etensor::DeviceIndex device_index = 0) {
     return program->load_mutable_subsegment_into(
-        mutable_data_segments_index, offset_index, size, buffer);
-  }
-
-  ET_NODISCARD static Result<FreeableBuffer> load_mutable_subsegment(
-      const Program* program,
-      size_t mutable_data_segments_index,
-      size_t offset_index,
-      size_t size) {
-    return program->load_mutable_subsegment(
-        mutable_data_segments_index, offset_index, size);
+        mutable_data_segments_index,
+        offset_index,
+        size,
+        buffer,
+        device_allocator,
+        device_index);
   }
 
   const static executorch_flatbuffer::Program* GetInternalProgram(
@@ -870,12 +870,18 @@ TEST_F(ProgramTest, LoadFromMutableSegment) {
   EXPECT_EQ(std::memcmp(buffer, buffer2, kWeightSize), 0)
       << "Loading the same segment twice should return identical data";
 
-  // Loading into a new buffer, as for device memory, returns the same data.
-  Result<FreeableBuffer> loaded = ProgramTestFriend::load_mutable_subsegment(
-      &program.get(), 0, 1, kWeightSize);
-  ASSERT_EQ(loaded.error(), Error::Ok);
-  ASSERT_EQ(loaded->size(), kWeightSize);
-  EXPECT_EQ(std::memcmp(loaded->data(), buffer, kWeightSize), 0);
+  // Loading into device memory goes through the device allocator and returns
+  // the same data.
+  MockCudaAllocator device_allocator;
+  uint8_t device_buffer[kWeightSize] = {0};
+  err = ProgramTestFriend::load_mutable_subsegment_into(
+      &program.get(), 0, 1, kWeightSize, device_buffer, &device_allocator, 1);
+  EXPECT_EQ(err, Error::Ok);
+  EXPECT_EQ(device_allocator.h2d_count_, 1);
+  EXPECT_EQ(device_allocator.last_h2d_dst_, device_buffer);
+  EXPECT_EQ(device_allocator.last_h2d_index_, 1);
+  EXPECT_EQ(device_allocator.synced_h2d_count_, 1);
+  EXPECT_EQ(std::memcmp(device_buffer, buffer, kWeightSize), 0);
 
   // Verify that the loaded data is non-trivial (not all zeros).
   bool has_nonzero = false;
@@ -938,15 +944,16 @@ TEST_F(ProgramTest, LoadFromMutableSegment) {
       &program.get(), 500, 1, 1, buffer);
   EXPECT_NE(err, Error::Ok);
 
-  // The new buffer variant checks the same bounds.
+  // Loads into device memory check the same bounds before copying anything.
   EXPECT_NE(
-      ProgramTestFriend::load_mutable_subsegment(&program.get(), 0, 1, 500)
-          .error(),
+      ProgramTestFriend::load_mutable_subsegment_into(
+          &program.get(), 0, 1, 500, device_buffer, &device_allocator, 1),
       Error::Ok);
   EXPECT_NE(
-      ProgramTestFriend::load_mutable_subsegment(&program.get(), 0, 500, 1)
-          .error(),
+      ProgramTestFriend::load_mutable_subsegment_into(
+          &program.get(), 0, 500, 1, device_buffer, &device_allocator, 1),
       Error::Ok);
+  EXPECT_EQ(device_allocator.h2d_count_, 1);
 }
 
 TEST_F(ProgramTest, LoadAndCheckPTESize) {

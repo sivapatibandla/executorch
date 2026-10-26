@@ -10,6 +10,7 @@
 
 #include <cstddef>
 
+#include <executorch/runtime/core/data_loader.h>
 #include <executorch/runtime/core/error.h>
 #include <executorch/runtime/core/memory_allocator.h>
 #include <executorch/runtime/core/portable_type/device.h>
@@ -109,6 +110,81 @@ class DeviceAllocator {
   virtual Error synchronize(etensor::DeviceIndex index) {
     (void)index;
     return Error::Ok;
+  }
+
+  // The defaults below stay in this header on purpose. While this class has
+  // no out-of-line virtual function, its vtable and these bodies are only
+  // compiled where a concrete allocator is defined, so programs that never
+  // use device memory do not carry them.
+
+  /**
+   * Copies the first `size` bytes of host `data` to `dst` on device `index`,
+   * then waits like synchronize(). Takes a data loader's result as it is, so
+   * a failed load can be passed straight in, and returns its error.
+   *
+   * The default uses copy_host_to_device() and synchronize(). An override
+   * must keep the same contract: pass on the error of `data`, accept zero
+   * bytes, reject a buffer shorter than `size`, and finish the copy before it
+   * returns, because `data` is freed then.
+   *
+   * @param data The host data, as a data loader returns it.
+   * @param dst The device memory to copy to.
+   * @param size The number of bytes to copy. `data` must hold at least this
+   *     many.
+   * @param index The device index.
+   * @return Error::Ok on success, or an appropriate error code on failure.
+   */
+  virtual Error copy_from_host(
+      Result<FreeableBuffer> data,
+      void* dst,
+      size_t size,
+      etensor::DeviceIndex index) {
+    if (!data.ok()) {
+      return data.error();
+    }
+    // A data loader returns no buffer for zero bytes, which allocators reject.
+    if (size == 0) {
+      return Error::Ok;
+    }
+    ET_CHECK_OR_RETURN_ERROR(
+        data->size() >= size,
+        InvalidProgram,
+        "Loaded %zu bytes for %zu bytes of device memory",
+        data->size(),
+        size);
+    ET_CHECK_OK_OR_RETURN_ERROR(
+        copy_host_to_device(dst, data->data(), size, index));
+    // The caller may read `dst` on a stream the copy is not ordered with, and
+    // `data` is freed when this returns.
+    return synchronize(index);
+  }
+
+  /**
+   * Loads `size` bytes at `offset` of a data loader's data into `dst` on
+   * device `index`, then waits like synchronize().
+   *
+   * The default loads the bytes on the host and passes them to
+   * copy_from_host(). An allocator can override it to read the loader's data
+   * straight into device memory. Keeping the host buffer in here also keeps
+   * that code out of callers, so builds without device memory stay smaller.
+   *
+   * @param loader The data loader to read from.
+   * @param offset The offset of the bytes in the loader's data.
+   * @param size The number of bytes to load.
+   * @param segment_info Describes the segment the bytes belong to.
+   * @param dst The device memory to load into.
+   * @param index The device index.
+   * @return Error::Ok on success, or an appropriate error code on failure.
+   */
+  virtual Error load_segment_into(
+      const DataLoader& loader,
+      size_t offset,
+      size_t size,
+      const DataLoader::SegmentInfo& segment_info,
+      void* dst,
+      etensor::DeviceIndex index) {
+    return copy_from_host(
+        loader.load(offset, size, segment_info), dst, size, index);
   }
 };
 

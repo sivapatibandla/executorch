@@ -29,18 +29,16 @@ class TensorParser final {
       size_t mutable_data_segments_index,
       size_t offset_index,
       size_t size,
-      void* buffer) {
+      void* buffer,
+      DeviceAllocator* device_allocator,
+      etensor::DeviceIndex device_index) {
     return program->load_mutable_subsegment_into(
-        mutable_data_segments_index, offset_index, size, buffer);
-  }
-
-  ET_NODISCARD static Result<FreeableBuffer> load_mutable_subsegment(
-      const Program* program,
-      size_t mutable_data_segments_index,
-      size_t offset_index,
-      size_t size) {
-    return program->load_mutable_subsegment(
-        mutable_data_segments_index, offset_index, size);
+        mutable_data_segments_index,
+        offset_index,
+        size,
+        buffer,
+        device_allocator,
+        device_index);
   }
 };
 
@@ -196,52 +194,28 @@ ET_NODISCARD Result<void*> getMemPlannedPtr(
 
 namespace {
 
-/// The device of the planned buffer that `allocation_info` points into. A
-/// buffer without device metadata is host memory.
-::executorch::runtime::etensor::Device getPlannedBufferDevice(
+/// Finds the allocator of the planned buffer that `allocation_info` points
+/// into. Sets `*device_allocator` to null when the buffer is host memory.
+ET_NODISCARD Error getPlannedBufferAllocator(
     const executorch_flatbuffer::AllocationDetails* allocation_info,
-    const HierarchicalAllocator* allocator) {
+    const HierarchicalAllocator* allocator,
+    DeviceAllocator** device_allocator,
+    etensor::DeviceIndex* device_index) {
+  *device_allocator = nullptr;
+  *device_index = 0;
   const auto devices = allocator->planned_buffer_devices();
   const uint32_t memory_id = allocation_info->memory_id() - 1;
-  if (memory_id < devices.size()) {
-    return devices[memory_id];
-  }
-  return ::executorch::runtime::etensor::DeviceType::CPU;
-}
-
-/// Copies `nbytes` of host `data` to `dst` in the memory of `device`. A data
-/// loader writes with the CPU, so it cannot load into device memory directly.
-ET_NODISCARD Error copyToDevice(
-    Result<FreeableBuffer> data,
-    void* dst,
-    size_t nbytes,
-    ::executorch::runtime::etensor::Device device) {
-  if (!data.ok()) {
-    return data.error();
-  }
-  // A data loader returns no buffer for zero bytes, which allocators reject.
-  if (nbytes == 0) {
+  if (memory_id >= devices.size() || devices[memory_id].is_cpu()) {
     return Error::Ok;
   }
+  *device_allocator = get_device_allocator(devices[memory_id].type());
+  *device_index = devices[memory_id].index();
   ET_CHECK_OR_RETURN_ERROR(
-      data->size() >= nbytes,
-      InvalidProgram,
-      "Loaded %zu bytes for a tensor of %zu bytes",
-      data->size(),
-      nbytes);
-  ::executorch::runtime::DeviceAllocator* device_allocator =
-      ::executorch::runtime::get_device_allocator(device.type());
-  ET_CHECK_OR_RETURN_ERROR(
-      device_allocator != nullptr,
+      *device_allocator != nullptr,
       NotFound,
       "No allocator registered for device type %d",
-      static_cast<int>(device.type()));
-  ET_CHECK_OK_OR_RETURN_ERROR(device_allocator->copy_host_to_device(
-      dst, data->data(), nbytes, device.index()));
-  // The first run may read the tensor on a stream the copy is not ordered
-  // with, for example when a caller sets its stream only around execute. This
-  // also lets `data` be freed when this returns.
-  return device_allocator->synchronize(device.index());
+      static_cast<int>(devices[memory_id].type()));
+  return Error::Ok;
 }
 
 } // namespace
@@ -308,14 +282,17 @@ ET_NODISCARD Result<void*> getTensorDataPtr(
       if (!planned_ptr.ok()) {
         return planned_ptr.error();
       }
-      const auto device = getPlannedBufferDevice(allocation_info, allocator);
-      auto load_error = device.is_cpu()
+      DeviceAllocator* device_allocator;
+      etensor::DeviceIndex device_index;
+      ET_CHECK_OK_OR_RETURN_ERROR(getPlannedBufferAllocator(
+          allocation_info, allocator, &device_allocator, &device_index));
+      auto load_error = device_allocator == nullptr
           ? named_data_map->load_data_into(fqn, planned_ptr.get(), nbytes)
-          : copyToDevice(
+          : device_allocator->copy_from_host(
                 named_data_map->get_data(fqn),
                 planned_ptr.get(),
                 nbytes,
-                device);
+                device_index);
       if (load_error != Error::Ok) {
         return load_error;
       }
@@ -341,16 +318,18 @@ ET_NODISCARD Result<void*> getTensorDataPtr(
     if (!planned_ptr.ok()) {
       return planned_ptr.error();
     }
-    const auto device = getPlannedBufferDevice(allocation_info, allocator);
-    auto err = device.is_cpu()
-        ? TensorParser::load_mutable_subsegment_into(
-              program, 0, data_buffer_idx, nbytes, planned_ptr.get())
-        : copyToDevice(
-              TensorParser::load_mutable_subsegment(
-                  program, 0, data_buffer_idx, nbytes),
-              planned_ptr.get(),
-              nbytes,
-              device);
+    DeviceAllocator* device_allocator;
+    etensor::DeviceIndex device_index;
+    ET_CHECK_OK_OR_RETURN_ERROR(getPlannedBufferAllocator(
+        allocation_info, allocator, &device_allocator, &device_index));
+    auto err = TensorParser::load_mutable_subsegment_into(
+        program,
+        0,
+        data_buffer_idx,
+        nbytes,
+        planned_ptr.get(),
+        device_allocator,
+        device_index);
 
     if (err != Error::Ok) {
       return err;
