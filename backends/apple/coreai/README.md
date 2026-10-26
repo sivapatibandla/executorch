@@ -36,6 +36,19 @@ export-time SHA-256 digest. Asset paths, including bundle and directory names,
 must remain distinct under case-insensitive, canonically normalized Unicode
 comparison. Accepted names are preserved, not rewritten.
 
+### Calling from Swift
+
+When using the Core AI backend, run ExecuTorch model loading, inference and
+cache operations on a background `DispatchQueue` or a dedicated worker thread.
+Do not call these synchronous APIs directly inside Swift `Task` or
+`Task.detached`, because doing so can hang your application.
+
+From async Swift code, submit the entire ExecuTorch call with
+`DispatchQueue.async` and await its result using a continuation. Do not block
+the Swift task with `DispatchQueue.sync` or a semaphore. Keep input tensors alive
+and unchanged until the ExecuTorch call returns, even if the waiting task is
+cancelled.
+
 ### AOT architecture selection
 
 Configure AOT export with `AOTCompileConfig`, including the target `platform` and
@@ -128,6 +141,9 @@ a fake bridge instead.
 
 `coreai_swift_bridge_test` runs the bridge's XCTests under `xctest` with
 `EXECUTORCH_BUILD_TESTS=ON`. It links CoreAI, so it runs only on macOS 27.
+The test build exports a small portable model for real session tests. CMake's
+`Python3_EXECUTABLE` must use the Python environment with the pinned Core AI
+requirements above. CTest supplies the generated fixture location to XCTest.
 
 ## Building
 
