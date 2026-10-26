@@ -226,6 +226,9 @@ def define_common_targets():
         cmd = "$(exe :export_program_with_device_info) --outdir $OUT",
         outs = {
             "ModuleAddWithDevice.pte": ["ModuleAddWithDevice.pte"],
+            "ModuleAddConstantWithDevice.pte": ["ModuleAddConstantWithDevice.pte"],
+            "ModuleAddConstantWithDeviceProgram.pte": ["ModuleAddConstantWithDeviceProgram.pte"],
+            "ModuleAddConstantWithDevice.ptd": ["ModuleAddConstantWithDevice.ptd"],
         },
         default_outs = ["."],
         visibility = [

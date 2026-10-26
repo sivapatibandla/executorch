@@ -217,13 +217,20 @@ the graph in the delegate.
   `skip_d2h_for_method_outputs`, read a copy in host memory. A delegate on another device then
   gets a second copy, from the host.
 - A constant, such as a weight, that a delegate reads from outside is copied to each device that
-  reads it.
+  reads it. `skip_h2d_for_constants` (below) can remove this copy.
 - A returned output that an operator outside the delegate writes in place, such as a mutable
   custom operator left on the host, is copied to the host and returned there. The method
   metadata gives the device of each output.
 
 Add `error_on_per_call_copies=True` to `PropagateDeviceConfig` to make `to_executorch` fail
 instead of warning. It fails only on a copy that one of the skip flags you set was meant to remove.
+
+**Set `skip_h2d_for_constants=True` to keep constants in device memory.** If only delegates on
+one device read a constant, it is loaded into that device's memory once, when the method loads,
+and not copied on every call. The cost: it takes device memory for as long as the method is
+loaded, and each method that reads it has its own copy. If another method reads the same
+constant on the host and its data is in the `.pte`, the `.pte` stores it twice. A constant that
+a host operator or a second device also reads is still copied on every call.
 
 **`skip_h2d_for_method_inputs` refuses inputs that the method changes.** `to_executorch` fails if
 the method changes an input, even when the delegate makes the change. This includes a mutable

@@ -59,7 +59,8 @@ class PropagateDeviceConfig:
     # by the caller, so they are still copied: their data stays on the host,
     # in the program or in its external data file. That copy runs on every
     # call, once for each device that reads the constant, and stays in device
-    # memory until the last delegate there has read it.
+    # memory until the last delegate there has read it. Set
+    # skip_h2d_for_constants to keep constants on the device instead.
     #
     # Pair with MemoryPlanningPass(alloc_graph_input=False), or the runtime reserves its own buffer
     # for the input and copies the caller's memory into it, which is what this exists to avoid.
@@ -79,10 +80,19 @@ class PropagateDeviceConfig:
     # A dict can be used to set per-method values, keyed by method name.
     skip_d2h_for_method_outputs: Union[bool, Dict[str, bool]] = False
 
+    # When True, a constant that only delegates on one device read is kept in
+    # that device's memory instead of being copied there on every call. The
+    # runtime loads its data there once, when it loads the method, through
+    # host memory. The constant then uses device memory for as long as the
+    # method is loaded, and each method that reads it keeps its own copy. A
+    # constant that anything else reads is still copied on every call.
+    skip_h2d_for_constants: bool = False
+
     # When True, the copies that the skip flags above cannot remove make
     # to_executorch raise instead of logging a warning: with
-    # skip_h2d_for_method_inputs, a constant copied to the device and a method
-    # input copied to the host for a reader off its device, and with
+    # skip_h2d_for_method_inputs or skip_h2d_for_constants, a constant copied
+    # to the device; with skip_h2d_for_method_inputs, a method input copied to
+    # the host for a reader off its device; and with
     # skip_d2h_for_method_outputs, a returned output copied to the host for a
     # host op that writes it. Each runs on every call. Use it to make sure a
     # program that skips its boundary copies has none left.
@@ -93,6 +103,7 @@ class PropagateDeviceConfig:
             (
                 str(self.skip_h2d_for_method_inputs),
                 str(self.skip_d2h_for_method_outputs),
+                self.skip_h2d_for_constants,
                 self.error_on_per_call_copies,
             )
         )
@@ -103,5 +114,6 @@ class PropagateDeviceConfig:
         return (
             self.skip_h2d_for_method_inputs == other.skip_h2d_for_method_inputs
             and self.skip_d2h_for_method_outputs == other.skip_d2h_for_method_outputs
+            and self.skip_h2d_for_constants == other.skip_h2d_for_constants
             and self.error_on_per_call_copies == other.error_on_per_call_copies
         )
