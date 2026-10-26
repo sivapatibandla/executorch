@@ -380,6 +380,9 @@ void expectConstantCopiedToDevice(
       static_cast<const NamedDataMap*>(data_map.get()));
   ASSERT_EQ(tensor.error(), Error::Ok);
   EXPECT_EQ(g_mock_cuda.h2d_count_, h2d_count + 1);
+  EXPECT_EQ(g_mock_cuda.synced_h2d_count_, h2d_count + 1)
+      << "the copy was not waited for before parsing returned";
+  EXPECT_EQ(g_mock_cuda.last_sync_index_, g_mock_cuda.last_h2d_index_);
   EXPECT_TRUE(g_mock_cuda.is_device_ptr(tensor->const_data_ptr()));
   const float* data = tensor->const_data_ptr<float>();
   for (int i = 0; i < 4; ++i) {

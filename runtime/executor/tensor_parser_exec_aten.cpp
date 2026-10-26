@@ -236,11 +236,12 @@ ET_NODISCARD Error copyToDevice(
       NotFound,
       "No allocator registered for device type %d",
       static_cast<int>(device.type()));
-  // `data` is freed when this returns. Data loaders return pageable host
-  // memory, which device runtimes such as CUDA finish reading before even an
-  // asynchronous copy returns.
-  return device_allocator->copy_host_to_device(
-      dst, data->data(), nbytes, device.index());
+  ET_CHECK_OK_OR_RETURN_ERROR(device_allocator->copy_host_to_device(
+      dst, data->data(), nbytes, device.index()));
+  // The first run may read the tensor on a stream the copy is not ordered
+  // with, for example when a caller sets its stream only around execute. This
+  // also lets `data` be freed when this returns.
+  return device_allocator->synchronize(device.index());
 }
 
 } // namespace

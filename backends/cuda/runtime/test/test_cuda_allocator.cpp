@@ -10,6 +10,8 @@
 
 #include <executorch/extension/cuda/runtime_api.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -177,6 +179,42 @@ TEST_F(CudaAllocatorTest, CopyRoundtripWithCallerStream) {
   }
   ASSERT_EQ(cudaStreamDestroy(s), cudaSuccess);
 }
+
+// The compatibility header has no HIP names for non-blocking streams or host
+// callbacks.
+#if !defined(EXECUTORCH_USE_HIP)
+// A method can be loaded on one stream and run on another that is not ordered
+// after it, so synchronize() has to wait for the stream the copies used: the
+// caller stream when one is set, otherwise the default stream.
+TEST_F(CudaAllocatorTest, SynchronizeWaitsForTheCopyStream) {
+  cudaStream_t caller;
+  ASSERT_EQ(
+      cudaStreamCreateWithFlags(&caller, cudaStreamNonBlocking), cudaSuccess);
+  for (cudaStream_t s : {caller, cudaStream_t{nullptr}}) {
+    std::optional<executorch::extension::cuda::CallerStreamGuard> g;
+    if (s != nullptr) {
+      g.emplace(s);
+    }
+    std::atomic<bool> done{false};
+    ASSERT_EQ(
+        cudaLaunchHostFunc(
+            s,
+            [](void* flag) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(200));
+              static_cast<std::atomic<bool>*>(flag)->store(true);
+            },
+            &done),
+        cudaSuccess);
+    EXPECT_EQ(CudaAllocator::instance().synchronize(0), Error::Ok);
+    EXPECT_TRUE(done.load())
+        << (s != nullptr ? "caller" : "default") << " stream";
+    // If synchronize() did not wait, the callback must still finish before
+    // `done` goes out of scope.
+    ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+  }
+  ASSERT_EQ(cudaStreamDestroy(caller), cudaSuccess);
+}
+#endif // !EXECUTORCH_USE_HIP
 
 TEST_F(CudaAllocatorTest, CopyHostToDeviceNullDstReturnsInvalidArgument) {
   CudaAllocator& a = CudaAllocator::instance();
