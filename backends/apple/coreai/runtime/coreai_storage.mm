@@ -278,12 +278,20 @@ int open_storage_shared_file(int parent_fd, const char* name) {
   return fd;
 }
 
-Error sync_storage_directory(int fd) {
+Error sync_storage_directory(int fd, bool full_sync) {
   ET_CHECK_OR_RETURN_ERROR(
       storage_call(
           StorageOperation::SyncDirectory, [&] { return fsync(fd); }) == 0,
       AccessFailed,
       "Cannot synchronize Core AI directory");
+  if (full_sync) {
+    ET_CHECK_OR_RETURN_ERROR(
+        storage_call(
+            StorageOperation::FullSync,
+            [&] { return fcntl(fd, F_FULLFSYNC); }) == 0,
+        AccessFailed,
+        "Cannot fully synchronize Core AI directory");
+  }
   return Error::Ok;
 }
 

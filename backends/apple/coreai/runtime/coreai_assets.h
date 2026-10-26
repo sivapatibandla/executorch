@@ -35,6 +35,8 @@ runtime::Result<Manifest> select_assets(
     NSString* device_architecture,
     NSString* platform);
 // Caller holds the key's disk lock and has prepared staging_root.
+// The key must identify the selected bundle's export-time digest and name;
+// it may also include platform or SDK context. Reuse does not verify contents.
 // Inline bundles are atomically published at staging_root/key/bundle.
 runtime::Result<NSURL*> prepare_source_bundle(
     const Manifest& manifest,

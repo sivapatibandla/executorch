@@ -469,7 +469,7 @@ Result<NSURL*> prepare_source_bundle(
   ET_CHECK_OR_RETURN_ERROR(
       *state == EntryState::Missing,
       InvalidExternalData,
-      "Cannot replace a damaged bookmark recovery source");
+      "Cannot replace a damaged Core AI stored bundle");
   ET_CHECK_OR_RETURN_ERROR(
       named_data != nullptr,
       InvalidProgram,
@@ -500,11 +500,14 @@ Result<NSURL*> prepare_source_bundle(
       NSString* data_key =
           [NSString stringWithFormat:@"coreai/%@/%@", manifest.hash, file];
       auto buffer = named_data->get_data(data_key.UTF8String);
-      ET_CHECK_OR_RETURN_ERROR(
-          buffer.ok(),
-          InvalidExternalData,
-          "Missing selected Core AI named data: %s",
-          data_key.UTF8String);
+      if (!buffer.ok()) {
+        ET_CHECK_OR_RETURN_ERROR(
+            buffer.error() != Error::NotFound,
+            InvalidExternalData,
+            "Missing selected Core AI named data: %s",
+            data_key.UTF8String);
+        return buffer.error();
+      }
       ET_CHECK_OR_RETURN_ERROR(
           buffer->size() == files[file].unsignedLongLongValue &&
               (buffer->size() == 0 || buffer->data() != nullptr),
@@ -515,6 +518,7 @@ Result<NSURL*> prepare_source_bundle(
     }
   }
   ET_CHECK_OK_OR_RETURN_ERROR(validate_tree(staging_fd.get(), files));
+  ET_CHECK_OK_OR_RETURN_ERROR(sync_storage_directory(staging_fd.get(), true));
   ET_CHECK_OR_RETURN_ERROR(
       storage_fault(StorageOperation::Rename) == 0,
       AccessFailed,
@@ -528,7 +532,7 @@ Result<NSURL*> prepare_source_bundle(
             RENAME_EXCL);
       }) == 0) {
     staging.url = nil;
-    ET_CHECK_OK_OR_RETURN_ERROR(sync_storage_directory(root_fd.get()));
+    ET_CHECK_OK_OR_RETURN_ERROR(sync_storage_directory(root_fd.get(), true));
     return model_url;
   }
   ET_CHECK_OR_RETURN_ERROR(
