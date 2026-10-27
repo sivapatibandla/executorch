@@ -8,6 +8,7 @@
 
 #import "ETCoreAIBridge.h"
 #import "coreai_assets.h"
+#include "coreai_backend_id.h"
 #import "coreai_load_coordinator.h"
 #import "coreai_storage.h"
 
@@ -399,6 +400,6 @@ class CoreAIBackend final : public BackendInterface {
 
 CoreAIBackend backend;
 [[maybe_unused]] const auto registration =
-    register_backend({"CoreAIBackend", &backend});
+    register_backend({kCoreAIBackendId, &backend});
 } // namespace
 } // namespace executorch::backends::coreai
