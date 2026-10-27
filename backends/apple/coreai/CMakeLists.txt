@@ -242,6 +242,21 @@ set_property(
   PROPERTY OBJECT_DEPENDS "${_coreai_swift_header}"
 )
 
+set(_coreai_run_sdk_tests FALSE)
+if(EXECUTORCH_BUILD_TESTS
+   AND CMAKE_SYSTEM_NAME STREQUAL "Darwin"
+   AND NOT CMAKE_CROSSCOMPILING
+)
+  execute_process(
+    COMMAND sw_vers -productVersion
+    OUTPUT_VARIABLE _coreai_host_version
+    OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY
+  )
+  if(_coreai_host_version VERSION_GREATER_EQUAL _coreai_deployment)
+    set(_coreai_run_sdk_tests TRUE)
+  endif()
+endif()
+
 # The Swift tests use the bridge's internal declarations, so they compile into
 # one module with it and run under xctest. Ninja on macOS only.
 if(EXECUTORCH_BUILD_TESTS
@@ -313,14 +328,17 @@ if(EXECUTORCH_BUILD_TESTS
             "${_coreai_fixture_dir}/dynamic/manifest.json"
   )
   add_dependencies(coreai_swift_bridge_test coreai_bridge_fixture)
-  add_test(NAME coreai_swift_bridge_test
-           COMMAND xcrun xctest "$<TARGET_BUNDLE_DIR:coreai_swift_bridge_test>"
-  )
-  set_tests_properties(
-    coreai_swift_bridge_test
-    PROPERTIES TIMEOUT 600 ENVIRONMENT
-               "COREAI_BRIDGE_FIXTURE_DIR=${_coreai_fixture_dir}"
-  )
+  if(_coreai_run_sdk_tests)
+    add_test(NAME coreai_swift_bridge_test
+             COMMAND xcrun xctest
+                     "$<TARGET_BUNDLE_DIR:coreai_swift_bridge_test>"
+    )
+    set_tests_properties(
+      coreai_swift_bridge_test
+      PROPERTIES TIMEOUT 600 ENVIRONMENT
+                 "COREAI_BRIDGE_FIXTURE_DIR=${_coreai_fixture_dir}"
+    )
+  endif()
   add_executable(
     coreai_sdk_source_lifetime_test
     runtime/test/SDKSourceLifetimeTest.swift runtime/ETCoreAIModel.swift
@@ -339,24 +357,24 @@ if(EXECUTORCH_BUILD_TESTS
   target_link_libraries(
     coreai_sdk_source_lifetime_test PRIVATE executorch::coreai_dependencies
   )
-  add_test(
-    NAME coreai_sdk_source_lifetime_test
-    COMMAND
-      "${PYTHON_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/runtime/test/run_sdk_source_lifetime.py"
-      "$<TARGET_FILE:coreai_sdk_source_lifetime_test>"
-  )
-  set_tests_properties(coreai_sdk_source_lifetime_test PROPERTIES TIMEOUT 240)
+  if(_coreai_run_sdk_tests)
+    add_test(
+      NAME coreai_sdk_source_lifetime_test
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/test/run_sdk_source_lifetime.py"
+        "$<TARGET_FILE:coreai_sdk_source_lifetime_test>"
+    )
+    set_tests_properties(coreai_sdk_source_lifetime_test PROPERTIES TIMEOUT 240)
+  endif()
 endif()
 
 if(EXECUTORCH_BUILD_SHARED)
   set(_coreai_library_type SHARED)
   set(_coreai_runtime executorch_shared)
-  set(_coreai_data_loader "")
 else()
   set(_coreai_library_type STATIC)
   set(_coreai_runtime executorch)
-  set(_coreai_data_loader extension_data_loader)
 endif()
 add_library(
   coreaidelegate ${_coreai_library_type} ${_coreai_runtime_sources}
@@ -369,7 +387,7 @@ coreai_require_os27(coreaidelegate)
 target_include_directories(coreaidelegate PUBLIC ${_common_include_directories})
 add_dependencies(coreaidelegate coreai_swift)
 target_link_libraries(
-  coreaidelegate PRIVATE coreai_swift ${_coreai_runtime} ${_coreai_data_loader}
+  coreaidelegate PRIVATE coreai_swift ${_coreai_runtime}
                          executorch::coreai_dependencies
 )
 executorch_target_link_options_shared_lib(coreaidelegate)
@@ -383,9 +401,10 @@ endif()
 
 # A consumer is necessary to check Swift linkage and registration retention.
 add_executable(coreai_runtime_smoke runtime/test/runtime_smoke.cpp)
-if(EXECUTORCH_BUILD_TESTS)
+if(_coreai_run_sdk_tests)
   add_test(NAME coreai_runtime_smoke COMMAND coreai_runtime_smoke)
-else()
+endif()
+if(NOT EXECUTORCH_BUILD_TESTS)
   set_target_properties(coreai_runtime_smoke PROPERTIES EXCLUDE_FROM_ALL TRUE)
 endif()
 coreai_require_os27(coreai_runtime_smoke)

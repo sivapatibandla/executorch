@@ -60,7 +60,9 @@ internal copies.
 
 After an execution error, do not use the outputs as inference results. Output
 shapes may already have changed, but no result bytes are copied unless every
-output passes validation and resizing.
+output passes validation and resizing. Malformed SDK outputs return `Internal`.
+Output dtype/rank mismatches and incompatible shapes or capacity return
+`InvalidArgument`.
 
 ### Calling from Swift
 
@@ -163,19 +165,18 @@ files, alter their backup flags, or use an App Group cache.
 
 Each partition derives a key from its selected export digest/bundle, source/AOT
 mode, platform, Core AI device architecture, default SDK cache namespace,
-versioned default options and persistent policy.
-options and persistent policy. Function bindings and delivery location are
-excluded. No model bytes are hashed at runtime. Each key determines a raw
-bookmark in the `bookmarks` subdirectory, a bundle directory in `staging`, and an
-empty coordination file in `locks`. There is no PTE-wide bookmark list or
-serialized lifecycle record.
+versioned default options and persistent policy. Function bindings and delivery
+location are excluded. No model bytes are hashed at runtime. Each key determines
+a raw bookmark in `bookmarks`, a bundle directory in `staging`, and an empty
+coordination file in `locks`. There is no PTE-wide bookmark list or serialized
+lifecycle record.
 
 A healthy bookmark hit does not consult NDS and attempts to clean leftover
 staging. On a missing bookmark or confirmed SDK miss, the coordinator prepares
 the source, specializes it and atomically writes the returned bookmark bytes.
 After durable publication, it attempts to remove the entire keyed staging
-directory while holding the per-key lock.
-caching supports inference and bookmark restoration without that extracted copy.
+directory while holding the per-key lock. Persistent SDK caching supports
+inference and bookmark restoration without that extracted copy.
 Keep the packaged named data available: a later SDK cache miss requires source
 materialization again. There is no secondary source-URL cache lookup.
 
@@ -260,7 +261,8 @@ Ninja builds use one architecture per build directory. Current runtime support
 covers arm64 macOS and iOS device builds. x86_64 builds are blocked by Swift
 `Float16` availability, and the tested iOS simulator SDKs do not contain Core AI.
 
-Enable `EXECUTORCH_BUILD_EXTENSION_DATA_LOADER` for inference consumers.
+The delegate does not require `EXECUTORCH_BUILD_EXTENSION_DATA_LOADER`.
+Enable it for consumers such as `Module` that load program data.
 Link the CMake target `coreaidelegate`, not just its archive filename. Its
 transitive dependencies supply Swift and Foundation/CoreAI linkage, and its
 link interface retains static backend registration. With
@@ -274,19 +276,24 @@ SwiftPM and XCFramework distribution are not integrated yet.
 
 The `coreai_runtime_smoke` target checks final linkage of a C++ consumer,
 including Swift dependencies and backend registration retention. With
-`EXECUTORCH_BUILD_TESTS=ON` it is built and
-registered with CTest; otherwise it is excluded from the default build. On OS 27,
-running it checks registration and availability; it does not perform model
-inference. Do not execute SDK27 binaries on an older host.
+`EXECUTORCH_BUILD_TESTS=ON` it is built; otherwise it is excluded from the
+default build. SDK-linked tests are registered with CTest only for native macOS
+builds when the host meets the target's deployment minimum (at least 27.0).
+Cross-builds and older hosts can build these tests without registering them.
+Running the smoke test checks registration and availability; it does not perform
+model inference. Do not execute SDK27 binaries on an older host.
 
 ## Host Tests
 
 On macOS, `EXECUTORCH_BUILD_COREAI=ON` with `EXECUTORCH_BUILD_TESTS=ON`
 registers the standalone `coreai_host_test` executable with CTest. It tests
-manifest parsing, AOT asset selection, and filesystem storage using Foundation,
-without Swift or CoreAI SDK calls. Acquisition contention tests run two threads
+manifest parsing, AOT asset selection, filesystem storage, and delegate
+initialization and execution against a fake bridge. It uses Foundation without
+Swift or CoreAI SDK calls. Acquisition contention tests run two threads
 inside a bounded child process; bookmark lock tests separately cover contention
 between processes. The host test target is omitted for Apple cross-builds.
+On supported macOS hosts, CTest also runs the Swift bridge tests, source-lifetime
+probes, and `coreai_runtime_smoke`, which link Swift and the Core AI framework.
 
 CI builds and runs these tests on macOS 27. To use the same configuration from
 the repository root:
