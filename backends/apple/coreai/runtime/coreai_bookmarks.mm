@@ -294,6 +294,10 @@ Error write_bookmark(const BookmarkLock& lock, NSData* data) {
       lock.bookmarks_.get(), bookmark_name(lock.key_), data);
 }
 
+Error remove_bookmark_staging(const BookmarkLock& lock) {
+  return remove_storage_staging(lock.root_.get(), lock.key_);
+}
+
 Result<NSString*> prepare_bookmark_staging(const BookmarkLock& lock) {
   auto staging = open_child(lock.root_.get(), @"staging", true);
   if (!staging.ok())

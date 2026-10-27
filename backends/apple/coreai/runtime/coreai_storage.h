@@ -39,6 +39,8 @@ runtime::Error publish_storage_data(int root_fd, NSString* name, NSData* data);
 runtime::Result<NSArray<NSString*>*> storage_children(
     int fd,
     bool skip_invalid_names = false);
+// The caller holds the key's lock. Missing staging is already removed.
+runtime::Error remove_storage_staging(int root_fd, NSString* key);
 
 enum class StorageOperation {
   Write,

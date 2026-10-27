@@ -33,6 +33,7 @@ class BookmarkLock final {
   lock_bookmark(NSString* root, NSString* key, bool create);
   friend runtime::Result<NSData*> read_bookmark(const BookmarkLock& lock);
   friend runtime::Error write_bookmark(const BookmarkLock& lock, NSData* data);
+  friend runtime::Error remove_bookmark_staging(const BookmarkLock& lock);
   friend runtime::Result<NSString*> prepare_bookmark_staging(
       const BookmarkLock& lock);
   BookmarkLock(
@@ -59,6 +60,9 @@ lock_bookmark(NSString* root, NSString* key, bool create = true);
 runtime::Result<NSData*> read_bookmark(const BookmarkLock& lock);
 // A staging-only lock has no bookmark directory; writes return InvalidArgument.
 runtime::Error write_bookmark(const BookmarkLock& lock, NSData* data);
+// Requires successful persistent specialization and durable bookmark
+// publication.
+runtime::Error remove_bookmark_staging(const BookmarkLock& lock);
 // Prepared only for cold loads; source preparation appends key/bundle.
 runtime::Result<NSString*> prepare_bookmark_staging(const BookmarkLock& lock);
 

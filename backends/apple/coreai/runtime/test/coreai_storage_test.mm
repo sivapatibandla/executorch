@@ -385,6 +385,184 @@ TEST(CoreAIStorageTest, ReportsPostRenameFlushFailureWithNewContentsVisible) {
   EXPECT_TRUE(no_temporary_files(root.get()));
 }
 
+namespace {
+class CoreAIStagingRemovalTest : public ::testing::Test {
+ protected:
+  TestDirectory storage;
+  FileDescriptor root{-1};
+  NSString* key = [@"a" stringByPaddingToLength:64
+                                     withString:@"a"
+                                startingAtIndex:0];
+
+  void SetUp() override {
+    ASSERT_NE(storage.url, nil);
+    root.reset(open(
+        storage.url.fileSystemRepresentation,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    ASSERT_GE(root.get(), 0);
+  }
+
+  NSString* entry() {
+    return [@"staging" stringByAppendingPathComponent:key];
+  }
+
+  Error populate() {
+    return write_storage_file(
+        root.get(),
+        [entry()
+            stringByAppendingPathComponent:@"model.aimodel/nested/weights"],
+        "weights",
+        7);
+  }
+};
+
+TEST_F(CoreAIStagingRemovalTest, RejectsInvalidKeysWithoutTouchingStorage) {
+  ASSERT_EQ(populate(), Error::Ok);
+  NSDictionary* before = nil;
+  ASSERT_TRUE(asset_tree_snapshot(storage.url, before));
+  for (NSString* invalid in
+       @[ @"", @"../escape", @"/absolute", @"short", key.uppercaseString ]) {
+    EXPECT_EQ(
+        remove_storage_staging(root.get(), invalid), Error::InvalidArgument);
+  }
+  EXPECT_EQ(remove_storage_staging(root.get(), nil), Error::InvalidArgument);
+  EXPECT_TRUE(snapshot_matches(storage.url, before));
+}
+
+TEST_F(CoreAIStagingRemovalTest, MissingStagingIsAlreadyRemoved) {
+  StorageFaultScope fault(StorageOperation::Remove);
+  EXPECT_EQ(remove_storage_staging(root.get(), key), Error::Ok);
+  ASSERT_EQ(mkdirat(root.get(), "staging", 0700), 0);
+  EXPECT_EQ(remove_storage_staging(root.get(), key), Error::Ok);
+  EXPECT_EQ(fault.matches, 0);
+  EXPECT_EQ(fault.hits, 0);
+}
+
+TEST_F(CoreAIStagingRemovalTest, RemovesWholeKeyWithoutTouchingOtherEntries) {
+  ASSERT_EQ(populate(), Error::Ok);
+  ASSERT_EQ(
+      mkdirat(
+          root.get(),
+          [entry() stringByAppendingPathComponent:@"empty"]
+              .fileSystemRepresentation,
+          0700),
+      0);
+  NSString* other = [@"b" stringByPaddingToLength:64
+                                       withString:@"b"
+                                  startingAtIndex:0];
+  NSString* other_path = [[@"staging" stringByAppendingPathComponent:other]
+      stringByAppendingPathComponent:@"keep"];
+  ASSERT_EQ(write_storage_file(root.get(), other_path, "other", 5), Error::Ok);
+  ASSERT_EQ(
+      write_storage_file(root.get(), @"unrelated", "outside", 7), Error::Ok);
+  EXPECT_EQ(remove_storage_staging(root.get(), key), Error::Ok);
+  struct stat info;
+  EXPECT_EQ(
+      fstatat(
+          root.get(),
+          entry().fileSystemRepresentation,
+          &info,
+          AT_SYMLINK_NOFOLLOW),
+      -1);
+  EXPECT_EQ(errno, ENOENT);
+  EXPECT_EQ(fstatat(root.get(), "staging", &info, AT_SYMLINK_NOFOLLOW), 0);
+  EXPECT_EQ(
+      fstatat(
+          root.get(),
+          other_path.fileSystemRepresentation,
+          &info,
+          AT_SYMLINK_NOFOLLOW),
+      0);
+  EXPECT_EQ(info.st_size, 5);
+  EXPECT_EQ(fstatat(root.get(), "unrelated", &info, AT_SYMLINK_NOFOLLOW), 0);
+  EXPECT_EQ(info.st_size, 7);
+  EXPECT_EQ(remove_storage_staging(root.get(), key), Error::Ok);
+}
+
+TEST_F(CoreAIStagingRemovalTest, RejectsLinkedStagingParent) {
+  TestDirectory outside;
+  ASSERT_NE(outside.url, nil);
+  ASSERT_EQ(
+      symlinkat(outside.url.fileSystemRepresentation, root.get(), "staging"),
+      0);
+  NSDictionary* before = nil;
+  ASSERT_TRUE(asset_tree_snapshot(storage.url, before));
+  EXPECT_EQ(remove_storage_staging(root.get(), key), Error::AccessFailed);
+  EXPECT_TRUE(snapshot_matches(storage.url, before));
+}
+
+class CoreAIUnsafeStagingTest : public CoreAIStagingRemovalTest,
+                                public ::testing::WithParamInterface<int> {};
+
+TEST_P(CoreAIUnsafeStagingTest, PreflightsEntireTreeBeforeUnlinking) {
+  TestDirectory outside;
+  ASSERT_NE(outside.url, nil);
+  NSURL* sentinel = [outside.url URLByAppendingPathComponent:@"sentinel"];
+  ASSERT_TRUE([[@"untouched" dataUsingEncoding:NSUTF8StringEncoding]
+      writeToURL:sentinel
+      atomically:YES]);
+  NSString* invalid = entry();
+  if (GetParam() < 2) {
+    ASSERT_EQ(mkdirat(root.get(), "staging", 0700), 0);
+  } else {
+    ASSERT_EQ(populate(), Error::Ok);
+    invalid = [entry() stringByAppendingPathComponent:@"z-invalid"];
+  }
+  if (GetParam() == 0 || GetParam() == 2) {
+    ASSERT_EQ(
+        symlinkat(
+            outside.url.fileSystemRepresentation,
+            root.get(),
+            invalid.fileSystemRepresentation),
+        0);
+  } else if (GetParam() == 1) {
+    ASSERT_EQ(write_storage_file(root.get(), invalid, "file", 4), Error::Ok);
+  } else {
+    ASSERT_EQ(mkfifoat(root.get(), invalid.fileSystemRepresentation, 0600), 0);
+  }
+  NSDictionary* before = nil;
+  NSDictionary* outside_before = nil;
+  ASSERT_TRUE(asset_tree_snapshot(storage.url, before));
+  ASSERT_TRUE(asset_tree_snapshot(outside.url, outside_before));
+  StorageFaultScope fault(StorageOperation::Remove);
+  EXPECT_EQ(
+      remove_storage_staging(root.get(), key), Error::InvalidExternalData);
+  EXPECT_EQ(fault.matches, 0);
+  EXPECT_TRUE(snapshot_matches(storage.url, before));
+  EXPECT_TRUE(snapshot_matches(outside.url, outside_before));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Entries,
+    CoreAIUnsafeStagingTest,
+    ::testing::Values(0, 1, 2, 3),
+    ([](const ::testing::TestParamInfo<int>& info) {
+      const char* names[] = {
+          "LinkedKey", "RegularKey", "LinkedChild", "FifoChild"};
+      return names[info.param];
+    }));
+
+TEST_F(CoreAIStagingRemovalTest, RetriesOnlyInterruptedRemovalAndSync) {
+  for (StorageOperation operation :
+       {StorageOperation::Remove, StorageOperation::SyncDirectory}) {
+    ASSERT_EQ(populate(), Error::Ok);
+    StorageFaultScope fault(operation);
+    fault.error = EINTR;
+    EXPECT_EQ(remove_storage_staging(root.get(), key), Error::Ok);
+    EXPECT_EQ(fault.hits, 1);
+    struct stat info;
+    EXPECT_EQ(
+        fstatat(
+            root.get(),
+            entry().fileSystemRepresentation,
+            &info,
+            AT_SYMLINK_NOFOLLOW),
+        -1);
+    EXPECT_EQ(errno, ENOENT);
+  }
+}
+} // namespace
+
 TEST(CoreAIStorageTest, RetriesInterruptedPublicationOperations) {
   TestDirectory storage;
   ASSERT_NE(storage.url, nil);
