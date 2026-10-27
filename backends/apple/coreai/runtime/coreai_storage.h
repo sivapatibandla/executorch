@@ -11,6 +11,7 @@
 #import <Foundation/Foundation.h>
 #include <executorch/runtime/core/result.h>
 #include <cstddef>
+#include "coreai_file.h"
 
 namespace executorch::backends::coreai {
 
@@ -45,6 +46,8 @@ enum class StorageOperation {
   SyncDirectory,
   FullSync,
   Rename,
+  CreateStagingDirectory,
+  OpenStagingDirectory,
   BeforeBookmarkLock,
   BeforeSDK,
   AfterSDK,
@@ -63,5 +66,17 @@ constexpr int storage_fault(StorageOperation) {
   return 0;
 }
 #endif
+
+template <typename F>
+auto storage_call(StorageOperation operation, F call) {
+  return retry_eintr([&]() -> decltype(call()) {
+    const int fault = storage_fault(operation);
+    if (fault != 0) {
+      errno = fault;
+      return -1;
+    }
+    return call();
+  });
+}
 
 } // namespace executorch::backends::coreai

@@ -34,14 +34,15 @@ runtime::Result<Manifest> select_assets(
     const Manifest& manifest,
     NSString* device_architecture,
     NSString* platform);
-// Caller holds the key's disk lock and has prepared staging_root.
-// The key must identify the selected bundle's export-time digest and name;
-// it may also include platform or SDK context. Reuse does not verify contents.
-// Inline bundles are atomically published at staging_root/key/bundle.
+// Caller holds the key's disk lock and has prepared source_root.
+// The key is 64 lowercase hex characters identifying the selected export digest
+// and bundle name, optionally including platform or SDK context.
+// Bundles are published at source_root/key/bundle. Reuse validates structure,
+// not contents, and fully flushes source_root before returning.
 runtime::Result<NSURL*> prepare_source_bundle(
     const Manifest& manifest,
     const runtime::NamedDataMap* named_data,
-    NSString* staging_root,
+    NSString* source_root,
     NSString* key);
 
 } // namespace executorch::backends::coreai

@@ -150,21 +150,24 @@ bool parse_version(id value, NSOperatingSystemVersion& version) {
   return numbers[0] > 0;
 }
 
-Error validate_directory(int fd, NSString* relative,
-                         NSDictionary<NSString*, NSNumber*>* files,
-                         NSSet<NSString*>* expected_directories,
-                         NSMutableSet<NSString*>* actual_files) {
+Error validate_directory(
+    int fd,
+    NSString* relative,
+    NSDictionary<NSString*, NSNumber*>* files,
+    NSSet<NSString*>* expected_directories,
+    NSMutableSet<NSString*>* actual_files) {
   auto children = storage_children(fd);
   if (!children.ok()) {
     return children.error();
   }
   for (NSString* name in children.get()) {
     @autoreleasepool {
-      NSString* path = [relative stringByAppendingPathComponent:name];
+      NSString* path = [relative stringByAppendingPathComponent:name]
+                           .decomposedStringWithCanonicalMapping;
       struct stat info;
       if (retry_eintr([&] {
-            return fstatat(fd, name.fileSystemRepresentation, &info,
-                           AT_SYMLINK_NOFOLLOW);
+            return fstatat(
+                fd, name.fileSystemRepresentation, &info, AT_SYMLINK_NOFOLLOW);
           }) != 0) {
         return path_error(errno);
       }
@@ -172,12 +175,15 @@ Error validate_directory(int fd, NSString* relative,
       ET_CHECK_OR_RETURN_ERROR(
           (directory && [expected_directories containsObject:path]) ||
               (S_ISREG(info.st_mode) && files[path] != nil),
-          InvalidExternalData, "Unexpected Core AI bundle entry: %s",
+          InvalidExternalData,
+          "Unexpected Core AI bundle entry: %s",
           path.UTF8String);
       if (directory) {
         FileDescriptor child(retry_eintr([&] {
-          return openat(fd, name.fileSystemRepresentation,
-                        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+          return openat(
+              fd,
+              name.fileSystemRepresentation,
+              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         }));
         if (child.get() < 0) {
           return path_error(errno);
@@ -188,7 +194,8 @@ Error validate_directory(int fd, NSString* relative,
         ET_CHECK_OR_RETURN_ERROR(
             static_cast<uint64_t>(info.st_size) ==
                 files[path].unsignedLongLongValue,
-            InvalidExternalData, "Core AI asset size does not match manifest");
+            InvalidExternalData,
+            "Core AI asset size does not match manifest");
         [actual_files addObject:path];
       }
     }
@@ -198,9 +205,14 @@ Error validate_directory(int fd, NSString* relative,
 
 // Checks the exact file set, entry types and sizes. Contents are not hashed.
 Error validate_tree(int fd, NSDictionary<NSString*, NSNumber*>* files) {
+  NSMutableDictionary<NSString*, NSNumber*>* normalized =
+      [NSMutableDictionary dictionary];
   NSMutableSet<NSString*>* expected_directories = [NSMutableSet set];
   for (NSString* file in files) {
-    NSString* directory = file.stringByDeletingLastPathComponent;
+    // Filesystem path conversion decomposes Unicode without changing NDS keys.
+    NSString* path = file.decomposedStringWithCanonicalMapping;
+    normalized[path] = files[file];
+    NSString* directory = path.stringByDeletingLastPathComponent;
     while (directory.length > 0) {
       [expected_directories addObject:directory];
       directory = directory.stringByDeletingLastPathComponent;
@@ -208,10 +220,11 @@ Error validate_tree(int fd, NSDictionary<NSString*, NSNumber*>* files) {
   }
   NSMutableSet<NSString*>* actual_files = [NSMutableSet set];
   ET_CHECK_OK_OR_RETURN_ERROR(validate_directory(
-      fd, @"", files, expected_directories, actual_files));
+      fd, @"", normalized, expected_directories, actual_files));
   ET_CHECK_OR_RETURN_ERROR(
-      [actual_files isEqualToSet:[NSSet setWithArray:files.allKeys]],
-      InvalidExternalData, "Core AI bundle file set does not match manifest");
+      [actual_files isEqualToSet:[NSSet setWithArray:normalized.allKeys]],
+      InvalidExternalData,
+      "Core AI bundle file set does not match manifest");
   return Error::Ok;
 }
 
@@ -222,13 +235,18 @@ Result<EntryState> inspect_entry(
     NSString* name,
     NSDictionary<NSString*, NSNumber*>* files) {
   FileDescriptor entry(retry_eintr([&] {
-    return openat(root_fd, name.fileSystemRepresentation,
-                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    return openat(
+        root_fd,
+        name.fileSystemRepresentation,
+        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   }));
   if (entry.get() < 0) {
-    if (errno == ENOENT) return EntryState::Missing;
-    ET_CHECK_OR_RETURN_ERROR(errno == ENOTDIR || errno == ELOOP, AccessFailed,
-                             "Cannot inspect Core AI stored bundle");
+    if (errno == ENOENT)
+      return EntryState::Missing;
+    ET_CHECK_OR_RETURN_ERROR(
+        errno == ENOTDIR || errno == ELOOP,
+        AccessFailed,
+        "Cannot inspect Core AI stored bundle");
     return EntryState::Corrupt;
   }
   const auto error = validate_tree(entry.get(), files);
@@ -426,7 +444,7 @@ Result<Manifest> select_assets(
 Result<NSURL*> prepare_source_bundle(
     const Manifest& manifest,
     const runtime::NamedDataMap* named_data,
-    NSString* staging_root,
+    NSString* source_root,
     NSString* key) {
   ET_CHECK_OR_RETURN_ERROR(
       relative_path(manifest.path),
@@ -435,12 +453,13 @@ Result<NSURL*> prepare_source_bundle(
   ET_CHECK_OR_RETURN_ERROR(
       nonempty_string(key) && key.length == 64 &&
           [key rangeOfCharacterFromSet:
-                   [[NSCharacterSet characterSetWithCharactersInString:
-                                        @"0123456789abcdef"] invertedSet]]
+                   [[NSCharacterSet
+                       characterSetWithCharactersInString:@"0123456789abcdef"]
+                       invertedSet]]
                   .location == NSNotFound,
       InvalidArgument,
       "Core AI staging key must be a 64-character lowercase hex digest");
-  auto prepared = prepare_storage_root(staging_root, false);
+  auto prepared = prepare_storage_root(source_root, false);
   if (!prepared.ok()) {
     return prepared.error();
   }
@@ -451,10 +470,10 @@ Result<NSURL*> prepare_source_bundle(
   NSURL* model_url = [[root URLByAppendingPathComponent:key isDirectory:YES]
       URLByAppendingPathComponent:manifest.path.lastPathComponent
                       isDirectory:YES];
-  // Inspect, stage and publish relative to one root descriptor.
+  // Inspection and publication stay bound to this root descriptor.
   FileDescriptor root_fd(retry_eintr([&] {
-    return open(root.fileSystemRepresentation,
-                O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    return open(
+        root.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   }));
   ET_CHECK_OR_RETURN_ERROR(
       root_fd.get() >= 0, AccessFailed, "Cannot open Core AI storage root");
@@ -463,6 +482,7 @@ Result<NSURL*> prepare_source_bundle(
     return state.error();
   }
   if (*state == EntryState::Valid) {
+    ET_CHECK_OK_OR_RETURN_ERROR(sync_storage_directory(root_fd.get(), true));
     return model_url;
   }
   // Recovery sources may still be in use by a previously acquired SDK model.
@@ -477,20 +497,23 @@ Result<NSURL*> prepare_source_bundle(
   NSString* staging_name =
       [@".staging-" stringByAppendingString:NSUUID.UUID.UUIDString];
   ET_CHECK_OR_RETURN_ERROR(
-      retry_eintr([&] {
-        return mkdirat(
-            root_fd.get(), staging_name.fileSystemRepresentation, 0700);
-      }) == 0,
+      storage_call(
+          StorageOperation::CreateStagingDirectory,
+          [&] {
+            return mkdirat(
+                root_fd.get(), staging_name.fileSystemRepresentation, 0700);
+          }) == 0,
       AccessFailed,
       "Cannot create Core AI staging directory");
   StagingDirectory staging{[root URLByAppendingPathComponent:staging_name
                                                  isDirectory:YES]};
-  FileDescriptor staging_fd(retry_eintr([&] {
-    return openat(
-        root_fd.get(),
-        staging_name.fileSystemRepresentation,
-        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-  }));
+  FileDescriptor staging_fd(
+      storage_call(StorageOperation::OpenStagingDirectory, [&] {
+        return openat(
+            root_fd.get(),
+            staging_name.fileSystemRepresentation,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+      }));
   ET_CHECK_OR_RETURN_ERROR(
       staging_fd.get() >= 0,
       AccessFailed,
@@ -519,11 +542,7 @@ Result<NSURL*> prepare_source_bundle(
   }
   ET_CHECK_OK_OR_RETURN_ERROR(validate_tree(staging_fd.get(), files));
   ET_CHECK_OK_OR_RETURN_ERROR(sync_storage_directory(staging_fd.get(), true));
-  ET_CHECK_OR_RETURN_ERROR(
-      storage_fault(StorageOperation::Rename) == 0,
-      AccessFailed,
-      "Core AI source publication interrupted");
-  if (retry_eintr([&] {
+  if (storage_call(StorageOperation::Rename, [&] {
         return renameatx_np(
             root_fd.get(),
             staging_name.fileSystemRepresentation,
@@ -546,6 +565,7 @@ Result<NSURL*> prepare_source_bundle(
       *winner == EntryState::Valid,
       InvalidExternalData,
       "Concurrently published Core AI source is incomplete");
+  ET_CHECK_OK_OR_RETURN_ERROR(sync_storage_directory(root_fd.get(), true));
   return model_url;
 }
 

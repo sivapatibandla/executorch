@@ -107,18 +107,6 @@ int storage_fault(StorageOperation operation) {
 #endif
 
 namespace {
-template <typename F>
-auto storage_call(StorageOperation operation, F call) {
-  return retry_eintr([&]() -> decltype(call()) {
-    const int fault = storage_fault(operation);
-    if (fault != 0) {
-      errno = fault;
-      return -1;
-    }
-    return call();
-  });
-}
-
 bool storage_component(NSString* name) {
   return [name isKindOfClass:NSString.class] && name.length > 0 &&
       ![name isEqualToString:@"."] && ![name isEqualToString:@".."] &&
