@@ -45,6 +45,7 @@ enum class StorageOperation {
   SyncDirectory,
   FullSync,
   Rename,
+  BeforeBookmarkLock,
   BeforeSDK,
   AfterSDK,
   BeforeEvict,
