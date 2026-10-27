@@ -161,13 +161,14 @@ also on the GPU.
 
 ### Things worth knowing
 
-**The two flags are independent.** Skip only the input copies if you produce data on the GPU but
-want results back on the host, or only the output copies for the reverse.
+**`skip_h2d_for_method_inputs` and `skip_d2h_for_method_outputs` are independent.** Skip only the
+input copies if you produce data on the GPU but want results back on the host, or only the output
+copies for the reverse.
 
-**Both flags need `enable_non_cpu_memory_planning=True`.** It defaults to `True`, so leaving it
-out works, and the snippet above sets it explicitly only to make the requirement visible. Setting
-it to `False` while asking for either skip raises a `ValueError`, because copy insertion happens
-during device-aware memory planning.
+**Every skip flag needs `enable_non_cpu_memory_planning=True`.** It defaults to `True`, so leaving
+it out works, and the snippet above sets it explicitly only to make the requirement visible.
+Setting it to `False` while asking for any skip raises a `ValueError`, because copy insertion
+happens during device-aware memory planning.
 
 **Inputs must be unplanned**, via `MemoryPlanningPass(alloc_graph_input=False)`. Without it the
 program reserves its own input buffer and the runtime copies the caller's memory into it, so the
@@ -230,7 +231,8 @@ one device read a constant, it is loaded into that device's memory once, when th
 and not copied on every call. The cost: it takes device memory for as long as the method is
 loaded, and each method that reads it has its own copy. If another method reads the same
 constant on the host and its data is in the `.pte`, the `.pte` stores it twice. A constant that
-a host operator or a second device also reads is still copied on every call.
+a host operator or a second device also reads is still copied on every call. This flag works on
+its own: it needs neither `skip_h2d_for_method_inputs` nor unplanned inputs.
 
 **`skip_h2d_for_method_inputs` refuses inputs that the method changes.** `to_executorch` fails if
 the method changes an input, even when the delegate makes the change. This includes a mutable
