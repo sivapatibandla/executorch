@@ -561,6 +561,231 @@ TEST_F(CoreAIStagingRemovalTest, RetriesOnlyInterruptedRemovalAndSync) {
     EXPECT_EQ(errno, ENOENT);
   }
 }
+
+TEST_F(CoreAIStagingRemovalTest, MaintenanceRemovesKeyedNonDirectoryEntries) {
+  TestDirectory outside;
+  ASSERT_NE(outside.url, nil);
+  NSURL* sentinel = [outside.url URLByAppendingPathComponent:@"sentinel"];
+  NSData* expected = [@"untouched" dataUsingEncoding:NSUTF8StringEncoding];
+  ASSERT_TRUE([expected writeToURL:sentinel atomically:YES]);
+  NSDictionary* outside_before = nil;
+  ASSERT_TRUE(asset_tree_snapshot(outside.url, outside_before));
+  ASSERT_EQ(mkdirat(root.get(), "staging", 0700), 0);
+  ASSERT_EQ(
+      symlinkat(
+          outside.url.fileSystemRepresentation,
+          root.get(),
+          entry().fileSystemRepresentation),
+      0);
+  EXPECT_EQ(
+      remove_storage_staging(
+          root.get(), key, true, StorageRemovalMode::Maintenance),
+      Error::Ok);
+  struct stat info;
+  EXPECT_EQ(
+      fstatat(
+          root.get(),
+          entry().fileSystemRepresentation,
+          &info,
+          AT_SYMLINK_NOFOLLOW),
+      -1);
+  EXPECT_EQ(errno, ENOENT);
+  ASSERT_EQ(mkfifoat(root.get(), entry().fileSystemRepresentation, 0600), 0);
+  EXPECT_EQ(
+      remove_storage_staging(
+          root.get(), key, true, StorageRemovalMode::Maintenance),
+      Error::Ok);
+  EXPECT_EQ(
+      fstatat(
+          root.get(),
+          entry().fileSystemRepresentation,
+          &info,
+          AT_SYMLINK_NOFOLLOW),
+      -1);
+  EXPECT_EQ(errno, ENOENT);
+  ASSERT_EQ(write_storage_file(root.get(), entry(), "stale", 5), Error::Ok);
+  EXPECT_EQ(
+      remove_storage_staging(
+          root.get(), key, true, StorageRemovalMode::Maintenance),
+      Error::Ok);
+  EXPECT_EQ(
+      fstatat(
+          root.get(),
+          entry().fileSystemRepresentation,
+          &info,
+          AT_SYMLINK_NOFOLLOW),
+      -1);
+  EXPECT_EQ(errno, ENOENT);
+  EXPECT_TRUE(snapshot_matches(outside.url, outside_before));
+  EXPECT_TRUE([[NSData dataWithContentsOfURL:sentinel] isEqual:expected]);
+}
+
+TEST_F(CoreAIStagingRemovalTest, MaintenanceRemovesNestedSpecialEntries) {
+  TestDirectory outside;
+  ASSERT_NE(outside.url, nil);
+  NSURL* sentinel = [outside.url URLByAppendingPathComponent:@"sentinel"];
+  NSData* expected = [@"untouched" dataUsingEncoding:NSUTF8StringEncoding];
+  ASSERT_TRUE([expected writeToURL:sentinel atomically:YES]);
+  ASSERT_EQ(populate(), Error::Ok);
+  NSString* bundle = [entry() stringByAppendingPathComponent:@"model.aimodel"];
+  ASSERT_EQ(
+      symlinkat(
+          sentinel.fileSystemRepresentation,
+          root.get(),
+          [bundle stringByAppendingPathComponent:@"link"]
+              .fileSystemRepresentation),
+      0);
+  ASSERT_EQ(
+      mkfifoat(
+          root.get(),
+          [bundle stringByAppendingPathComponent:@"pipe"]
+              .fileSystemRepresentation,
+          0600),
+      0);
+  ASSERT_EQ(
+      write_storage_file(
+          root.get(),
+          [bundle stringByAppendingPathComponent:@"nested/extra"],
+          "extra",
+          5),
+      Error::Ok);
+  NSDictionary* outside_before = nil;
+  ASSERT_TRUE(asset_tree_snapshot(outside.url, outside_before));
+  EXPECT_EQ(
+      remove_storage_staging(
+          root.get(), key, true, StorageRemovalMode::Maintenance),
+      Error::Ok);
+  struct stat info;
+  EXPECT_EQ(
+      fstatat(
+          root.get(),
+          entry().fileSystemRepresentation,
+          &info,
+          AT_SYMLINK_NOFOLLOW),
+      -1);
+  EXPECT_EQ(errno, ENOENT);
+  EXPECT_TRUE(snapshot_matches(outside.url, outside_before));
+  EXPECT_TRUE([[NSData dataWithContentsOfURL:sentinel] isEqual:expected]);
+}
+
+TEST_F(CoreAIStagingRemovalTest, MaintenanceEntryHandlesBookmarkLikeEntries) {
+  TestDirectory outside;
+  ASSERT_NE(outside.url, nil);
+  NSURL* sentinel = [outside.url URLByAppendingPathComponent:@"sentinel"];
+  NSData* expected = [@"untouched" dataUsingEncoding:NSUTF8StringEncoding];
+  ASSERT_TRUE([expected writeToURL:sentinel atomically:YES]);
+  NSDictionary* outside_before = nil;
+  ASSERT_TRUE(asset_tree_snapshot(outside.url, outside_before));
+  NSString* bookmark_like = [key stringByAppendingString:@".bookmark"];
+  ASSERT_EQ(
+      write_storage_file(root.get(), bookmark_like, "bookmark", 8), Error::Ok);
+  EXPECT_EQ(remove_storage_entry(root.get(), bookmark_like), Error::Ok);
+  ASSERT_EQ(
+      symlinkat(
+          sentinel.fileSystemRepresentation,
+          root.get(),
+          bookmark_like.fileSystemRepresentation),
+      0);
+  EXPECT_EQ(remove_storage_entry(root.get(), bookmark_like), Error::Ok);
+  ASSERT_EQ(
+      mkfifoat(root.get(), bookmark_like.fileSystemRepresentation, 0600), 0);
+  EXPECT_EQ(remove_storage_entry(root.get(), bookmark_like), Error::Ok);
+  ASSERT_EQ(
+      mkdirat(root.get(), bookmark_like.fileSystemRepresentation, 0700), 0);
+  ASSERT_EQ(
+      symlinkat(
+          sentinel.fileSystemRepresentation,
+          root.get(),
+          [bookmark_like stringByAppendingPathComponent:@"link"]
+              .fileSystemRepresentation),
+      0);
+  ASSERT_EQ(
+      mkfifoat(
+          root.get(),
+          [bookmark_like stringByAppendingPathComponent:@"pipe"]
+              .fileSystemRepresentation,
+          0600),
+      0);
+  ASSERT_EQ(
+      write_storage_file(
+          root.get(),
+          [bookmark_like stringByAppendingPathComponent:@"nested/weights"],
+          "weights",
+          7),
+      Error::Ok);
+  EXPECT_EQ(remove_storage_entry(root.get(), bookmark_like, false), Error::Ok);
+  struct stat info;
+  EXPECT_EQ(
+      fstatat(
+          root.get(),
+          bookmark_like.fileSystemRepresentation,
+          &info,
+          AT_SYMLINK_NOFOLLOW),
+      0);
+  EXPECT_TRUE(S_ISDIR(info.st_mode));
+  EXPECT_EQ(remove_storage_entry(root.get(), bookmark_like), Error::Ok);
+  EXPECT_EQ(
+      fstatat(
+          root.get(),
+          bookmark_like.fileSystemRepresentation,
+          &info,
+          AT_SYMLINK_NOFOLLOW),
+      -1);
+  EXPECT_EQ(errno, ENOENT);
+  EXPECT_EQ(remove_storage_entry(root.get(), bookmark_like), Error::Ok);
+  EXPECT_TRUE(snapshot_matches(outside.url, outside_before));
+  EXPECT_TRUE([[NSData dataWithContentsOfURL:sentinel] isEqual:expected]);
+}
+
+TEST_F(
+    CoreAIStagingRemovalTest,
+    RejectsInvalidEntryNamesWithoutTouchingStorage) {
+  ASSERT_EQ(write_storage_file(root.get(), @"kept", "kept", 4), Error::Ok);
+  NSDictionary* before = nil;
+  ASSERT_TRUE(asset_tree_snapshot(storage.url, before));
+  for (NSString* invalid in @[ @"", @".", @"..", @"a/b", @"/absolute" ]) {
+    EXPECT_EQ(
+        remove_storage_entry(root.get(), invalid), Error::InvalidArgument);
+  }
+  EXPECT_EQ(remove_storage_entry(root.get(), nil), Error::InvalidArgument);
+  EXPECT_TRUE(snapshot_matches(storage.url, before));
+}
+
+TEST_F(CoreAIStagingRemovalTest, MaintenanceKeepsKeyValidation) {
+  ASSERT_EQ(populate(), Error::Ok);
+  NSDictionary* before = nil;
+  ASSERT_TRUE(asset_tree_snapshot(storage.url, before));
+  for (NSString* invalid in
+       @[ @"", @"../escape", @"/absolute", @"short", key.uppercaseString ]) {
+    EXPECT_EQ(
+        remove_storage_staging(
+            root.get(), invalid, true, StorageRemovalMode::Maintenance),
+        Error::InvalidArgument);
+  }
+  EXPECT_EQ(
+      remove_storage_staging(
+          root.get(), nil, true, StorageRemovalMode::Maintenance),
+      Error::InvalidArgument);
+  EXPECT_TRUE(snapshot_matches(storage.url, before));
+}
+
+TEST_F(CoreAIStagingRemovalTest, MaintenanceRejectsLinkedStagingParent) {
+  TestDirectory outside;
+  ASSERT_NE(outside.url, nil);
+  ASSERT_EQ(
+      symlinkat(outside.url.fileSystemRepresentation, root.get(), "staging"),
+      0);
+  NSDictionary* before = nil;
+  NSDictionary* outside_before = nil;
+  ASSERT_TRUE(asset_tree_snapshot(storage.url, before));
+  ASSERT_TRUE(asset_tree_snapshot(outside.url, outside_before));
+  EXPECT_EQ(
+      remove_storage_staging(
+          root.get(), key, true, StorageRemovalMode::Maintenance),
+      Error::AccessFailed);
+  EXPECT_TRUE(snapshot_matches(storage.url, before));
+  EXPECT_TRUE(snapshot_matches(outside.url, outside_before));
+}
 } // namespace
 
 TEST(CoreAIStorageTest, RetriesInterruptedPublicationOperations) {

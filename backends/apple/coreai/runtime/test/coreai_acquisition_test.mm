@@ -97,6 +97,89 @@ class CoreAIAcquisitionTest : public ::testing::Test {
   }
 };
 
+TEST_F(
+    CoreAIAcquisitionTest,
+    AttributionPublicationFailurePrecedesSdkAndSourceAccess) {
+  BookmarkLoaderScope fake;
+  {
+    StorageFaultScope fault(StorageOperation::Rename);
+    EXPECT_EQ(acquire(fake.loader, &data), Error::AccessFailed);
+    EXPECT_EQ(fault.hits, 1);
+  }
+  EXPECT_EQ(fake.loader->specializations.load(), 0);
+  EXPECT_EQ(fake.loader->restores.load(), 0);
+  EXPECT_EQ(data.attempts.load(), 0);
+  EXPECT_EQ(saved(), nil);
+  EXPECT_FALSE(staging_key_exists());
+  EXPECT_EQ(acquire(fake.loader, &data), Error::Ok);
+  auto locked = lock_bookmark(root.url.path, key, false);
+  ASSERT_TRUE(locked.ok());
+  ASSERT_NE(locked.get(), nullptr);
+  auto identity = read_bookmark_identity(*locked.get());
+  ASSERT_TRUE(identity.ok());
+  EXPECT_NE(identity.get(), nil);
+}
+
+TEST_F(
+    CoreAIAcquisitionTest,
+    AttributionFlushFailureMustBeRetriedBeforeSdkAccess) {
+  BookmarkLoaderScope fake;
+  {
+    StorageFaultScope fault(StorageOperation::FullSync);
+    fault.match_index = 2;
+    EXPECT_EQ(acquire(fake.loader, &data), Error::AccessFailed);
+    EXPECT_EQ(fault.hits, 1);
+  }
+  {
+    auto locked = lock_bookmark(root.url.path, key, false);
+    ASSERT_TRUE(locked.ok());
+    ASSERT_NE(locked.get(), nullptr);
+    auto identity = read_bookmark_identity(*locked.get());
+    ASSERT_TRUE(identity.ok());
+    EXPECT_NE(identity.get(), nil);
+  }
+  {
+    StorageFaultScope fault(StorageOperation::FullSync);
+    EXPECT_EQ(acquire(fake.loader, &data), Error::AccessFailed);
+    EXPECT_EQ(fault.hits, 1);
+  }
+  EXPECT_EQ(fake.loader->specializations.load(), 0);
+  EXPECT_EQ(fake.loader->restores.load(), 0);
+  EXPECT_EQ(data.attempts.load(), 0);
+  EXPECT_EQ(saved(), nil);
+  EXPECT_FALSE(staging_key_exists());
+  EXPECT_EQ(acquire(fake.loader, &data), Error::Ok);
+}
+
+TEST_F(CoreAIAcquisitionTest, WarmLegacyEntryGetsAttributionWithoutRestaging) {
+  BookmarkLoaderScope fake;
+  ASSERT_EQ(acquire(fake.loader, &data), Error::Ok);
+  NSData* original = saved();
+  {
+    auto locked = lock_bookmark(root.url.path, key, false);
+    ASSERT_TRUE(locked.ok());
+    ASSERT_NE(locked.get(), nullptr);
+    ASSERT_EQ(remove_bookmark_identity(*locked.get()), Error::Ok);
+  }
+  {
+    StorageFaultScope fault(StorageOperation::Write);
+    EXPECT_EQ(acquire(fake.loader, nullptr), Error::AccessFailed);
+    EXPECT_EQ(fault.hits, 1);
+  }
+  EXPECT_TRUE([saved() isEqual:original]);
+  EXPECT_EQ(fake.loader->restores.load(), 0);
+  ASSERT_EQ(acquire(fake.loader, nullptr), Error::Ok);
+  EXPECT_EQ(fake.loader->restores.load(), 1);
+  EXPECT_EQ(fake.loader->specializations.load(), 1);
+  EXPECT_EQ(data.attempts.load(), 1);
+  auto locked = lock_bookmark(root.url.path, key, false);
+  ASSERT_TRUE(locked.ok());
+  ASSERT_NE(locked.get(), nullptr);
+  auto identity = read_bookmark_identity(*locked.get());
+  ASSERT_TRUE(identity.ok());
+  EXPECT_NE(identity.get(), nil);
+}
+
 TEST_F(CoreAIAcquisitionTest, ColdSpecializesStagedSourceAndPersistsBookmark) {
   BookmarkLoaderScope fake;
   ASSERT_EQ(acquire(fake.loader, &data), Error::Ok);
@@ -363,13 +446,19 @@ TEST_F(CoreAIAcquisitionTest, SpecializeErrorPerformsNoCleanup) {
 
 TEST_F(CoreAIAcquisitionTest, BookmarkFinalFlushFailurePerformsNoCleanup) {
   BookmarkLoaderScope fake;
+  {
+    auto locked = lock_bookmark(root.url.path, key);
+    ASSERT_TRUE(locked.ok());
+    ASSERT_EQ(
+        ensure_bookmark_identity(*locked.get(), manifest, @"macOS", @"arch_b"),
+        Error::Ok);
+  }
   __block std::vector<StorageOperation> ops;
   Error error = Error::Internal;
   {
-    // Cold source contributes two FullSyncs and the bookmark two more, so
-    // index four is the post-rename bookmark flush.
+    // Attribution reuse flushes once, then source and bookmark twice each.
     StorageFaultScope fault(StorageOperation::FullSync);
-    fault.match_index = 4;
+    fault.match_index = 5;
     fault.observe = ^(StorageOperation operation) {
       ops.push_back(operation);
     };
@@ -588,9 +677,14 @@ TEST_P(CoreAIAcquisitionSaveFailureTest, PreservesBookmarkAndRetries) {
     fake.loader.restoreMiss = YES;
   }
   {
-    // Cold and rematerialized sources publish before the bookmark, so the
-    // bookmark rename is the second rename once the first success has
-    // cleaned the source.
+    auto locked = lock_bookmark(root.url.path, key);
+    ASSERT_TRUE(locked.ok());
+    ASSERT_EQ(
+        ensure_bookmark_identity(*locked.get(), manifest, @"macOS", @"arch_b"),
+        Error::Ok);
+  }
+  {
+    // With attribution present, the bookmark follows source publication.
     StorageFaultScope fault(StorageOperation::Rename);
     fault.match_index = 2;
     EXPECT_EQ(acquire(fake.loader, &data), Error::AccessFailed);

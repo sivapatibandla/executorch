@@ -39,12 +39,32 @@ runtime::Error publish_storage_data(int root_fd, NSString* name, NSData* data);
 runtime::Result<NSArray<NSString*>*> storage_children(
     int fd,
     bool skip_invalid_names = false);
+enum class StorageRemovalMode {
+  Strict,
+  Maintenance,
+};
+
 // The caller holds the key's lock. Missing staging is already removed.
 // With remove=false, only preflight the keyed tree without modifying it.
+// Maintenance recovers malformed backend-owned entries without following
+// symlinks. Strict keeps ordinary acquisition validation.
 runtime::Error remove_storage_staging(
-    int root_fd, NSString* key, bool remove = true);
+    int root_fd,
+    NSString* key,
+    bool remove = true,
+    StorageRemovalMode mode = StorageRemovalMode::Strict);
 // Removes a keyed child of source_root_fd under the same lock requirement.
-runtime::Error remove_storage_source(int source_root_fd, NSString* key, bool remove = true);
+// Maintenance also unlinks a non-directory keyed entry.
+runtime::Error remove_storage_source(
+    int source_root_fd,
+    NSString* key,
+    bool remove = true,
+    StorageRemovalMode mode = StorageRemovalMode::Strict);
+// Removes one validated entry without following symlinks, covering directory
+// trees as well as bookmark-style files, links, and FIFOs. Missing entries
+// are already removed.
+runtime::Error
+remove_storage_entry(int parent_fd, NSString* name, bool remove = true);
 
 enum class StorageOperation {
   Write,

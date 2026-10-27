@@ -158,7 +158,7 @@ TEST_F(CoreAIDelegateTest, PteClearingFindsLoadedSourceAndAotEntries) {
         ASSERT_EQ(
             clear_cache_for_pte(pte, fixture.storage.url.path.UTF8String),
             Error::Ok);
-        EXPECT_EQ(bridge.state().architecture_queries.load(), queries + 2);
+        EXPECT_EQ(bridge.state().architecture_queries.load(), queries + 1);
         EXPECT_EQ(fake.loader->specializations.load(), 1);
         EXPECT_EQ(fake.loader->evictions.load(), 1);
         EXPECT_EQ(fake.loader.models[bookmark.get()], nil);
@@ -216,7 +216,7 @@ TEST_F(CoreAIDelegateTest, DefaultRootClearingMatchesDefaultInitialization) {
 
 TEST_F(CoreAIDelegateTest, MissingDefaultRootClearingDoesNotCreateStorage) {
   @autoreleasepool {
-    BookmarkDirectory root;
+    TestDirectory root;
     ASSERT_NE(root.url, nil);
     NSString* missing =
         [root.url.path stringByAppendingPathComponent:@"missing"];

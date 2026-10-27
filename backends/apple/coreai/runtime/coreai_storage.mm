@@ -55,11 +55,12 @@ Result<NSString*> default_coreai_assets_root() {
         [NSString stringWithUTF8String:testing::default_assets_root_override];
   }
 #endif
-  NSURL* caches = [NSFileManager.defaultManager
-                      URLsForDirectory:NSCachesDirectory
-                             inDomains:NSUserDomainMask].firstObject;
-  ET_CHECK_OR_RETURN_ERROR(caches.isFileURL, AccessFailed,
-                           "Cannot resolve Core AI cache directory");
+  NSURL* caches =
+      [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory
+                                           inDomains:NSUserDomainMask]
+          .firstObject;
+  ET_CHECK_OR_RETURN_ERROR(
+      caches.isFileURL, AccessFailed, "Cannot resolve Core AI cache directory");
   return [caches.path stringByAppendingPathComponent:@"executorch_coreai"];
 }
 
@@ -103,7 +104,7 @@ Result<NSString*> prepare_storage_root(NSString* path, bool create) {
 namespace testing {
 thread_local StorageFaultCallback storage_fault_callback = nullptr;
 thread_local const char* default_assets_root_override = nullptr;
-}
+} // namespace testing
 
 int storage_fault(StorageOperation operation) {
   return testing::storage_fault_callback == nullptr
@@ -209,8 +210,9 @@ Error write_file(
 }
 
 // Preflight the whole tree before unlinking anything; never follow source
-// links.
-Error visit_source_tree(int fd, bool remove) {
+// links. Maintenance also accepts symlinks, FIFOs, and other non-directory
+// entries so malformed backend-owned state can be recovered.
+Error visit_source_tree(int fd, bool remove, StorageRemovalMode mode) {
   auto names = storage_children(fd);
   if (!names.ok())
     return names.error();
@@ -223,11 +225,14 @@ Error visit_source_tree(int fd, bool remove) {
         }) == 0,
         AccessFailed,
         "Cannot inspect Core AI source entry");
-    ET_CHECK_OR_RETURN_ERROR(
-        S_ISDIR(info.st_mode) || S_ISREG(info.st_mode),
-        InvalidExternalData,
-        "Unexpected Core AI source entry type");
-    if (S_ISDIR(info.st_mode)) {
+    const bool directory = S_ISDIR(info.st_mode);
+    if (mode == StorageRemovalMode::Strict) {
+      ET_CHECK_OR_RETURN_ERROR(
+          directory || S_ISREG(info.st_mode),
+          InvalidExternalData,
+          "Unexpected Core AI source entry type");
+    }
+    if (directory) {
       FileDescriptor child(retry_eintr([&] {
         return openat(
             fd,
@@ -238,7 +243,7 @@ Error visit_source_tree(int fd, bool remove) {
           child.get() >= 0,
           AccessFailed,
           "Cannot open Core AI source directory");
-      ET_CHECK_OK_OR_RETURN_ERROR(visit_source_tree(child.get(), remove));
+      ET_CHECK_OK_OR_RETURN_ERROR(visit_source_tree(child.get(), remove, mode));
     }
     if (remove) {
       ET_CHECK_OR_RETURN_ERROR(
@@ -248,7 +253,7 @@ Error visit_source_tree(int fd, bool remove) {
                 return unlinkat(
                     fd,
                     name.fileSystemRepresentation,
-                    S_ISDIR(info.st_mode) ? AT_REMOVEDIR : 0);
+                    directory ? AT_REMOVEDIR : 0);
               }) == 0,
           AccessFailed,
           "Cannot remove Core AI source entry");
@@ -348,7 +353,63 @@ bool storage_key(NSString* key) {
 }
 } // namespace
 
-Error remove_storage_staging(int root_fd, NSString* key, bool remove) {
+Error remove_storage_entry(int parent_fd, NSString* name, bool remove) {
+  ET_CHECK_OR_RETURN_ERROR(
+      storage_component(name), InvalidArgument, "Invalid Core AI entry name");
+  struct stat info;
+  const int inspected = retry_eintr([&] {
+    return fstatat(
+        parent_fd, name.fileSystemRepresentation, &info, AT_SYMLINK_NOFOLLOW);
+  });
+  if (inspected < 0 && errno == ENOENT)
+    return Error::Ok;
+  ET_CHECK_OR_RETURN_ERROR(
+      inspected == 0, AccessFailed, "Cannot inspect Core AI storage entry");
+  if (!S_ISDIR(info.st_mode)) {
+    if (!remove)
+      return Error::Ok;
+    ET_CHECK_OR_RETURN_ERROR(
+        storage_call(
+            StorageOperation::Remove,
+            [&] {
+              return unlinkat(parent_fd, name.fileSystemRepresentation, 0);
+            }) == 0 ||
+            errno == ENOENT,
+        AccessFailed,
+        "Cannot remove Core AI storage entry");
+    return sync_storage_directory(parent_fd);
+  }
+  FileDescriptor entry(retry_eintr([&] {
+    return openat(
+        parent_fd,
+        name.fileSystemRepresentation,
+        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  }));
+  ET_CHECK_OR_RETURN_ERROR(
+      entry.get() >= 0, AccessFailed, "Cannot open Core AI storage directory");
+  ET_CHECK_OK_OR_RETURN_ERROR(
+      visit_source_tree(entry.get(), false, StorageRemovalMode::Maintenance));
+  if (!remove)
+    return Error::Ok;
+  ET_CHECK_OK_OR_RETURN_ERROR(
+      visit_source_tree(entry.get(), true, StorageRemovalMode::Maintenance));
+  ET_CHECK_OR_RETURN_ERROR(
+      storage_call(
+          StorageOperation::Remove,
+          [&] {
+            return unlinkat(
+                parent_fd, name.fileSystemRepresentation, AT_REMOVEDIR);
+          }) == 0,
+      AccessFailed,
+      "Cannot remove Core AI storage directory");
+  return sync_storage_directory(parent_fd);
+}
+
+Error remove_storage_staging(
+    int root_fd,
+    NSString* key,
+    bool remove,
+    StorageRemovalMode mode) {
   ET_CHECK_OR_RETURN_ERROR(
       storage_key(key), InvalidArgument, "Invalid Core AI staging key");
   FileDescriptor staging(retry_eintr([&] {
@@ -361,10 +422,14 @@ Error remove_storage_staging(int root_fd, NSString* key, bool remove) {
       staging.get() >= 0,
       AccessFailed,
       "Cannot open Core AI staging directory");
-  return remove_storage_source(staging.get(), key, remove);
+  return remove_storage_source(staging.get(), key, remove, mode);
 }
 
-Error remove_storage_source(int source_root_fd, NSString* key, bool remove) {
+Error remove_storage_source(
+    int source_root_fd,
+    NSString* key,
+    bool remove,
+    StorageRemovalMode mode) {
   ET_CHECK_OR_RETURN_ERROR(
       storage_key(key), InvalidArgument, "Invalid Core AI staging key");
   struct stat info;
@@ -381,10 +446,13 @@ Error remove_storage_source(int source_root_fd, NSString* key, bool remove) {
       inspected == 0,
       AccessFailed,
       "Cannot inspect Core AI keyed staging directory");
-  ET_CHECK_OR_RETURN_ERROR(
-      S_ISDIR(info.st_mode),
-      InvalidExternalData,
-      "Core AI keyed staging entry is not a directory");
+  if (!S_ISDIR(info.st_mode)) {
+    ET_CHECK_OR_RETURN_ERROR(
+        mode == StorageRemovalMode::Maintenance,
+        InvalidExternalData,
+        "Core AI keyed staging entry is not a directory");
+    return remove_storage_entry(source_root_fd, key, remove);
+  }
   FileDescriptor source(retry_eintr([&] {
     return openat(
         source_root_fd,
@@ -395,9 +463,10 @@ Error remove_storage_source(int source_root_fd, NSString* key, bool remove) {
       source.get() >= 0,
       AccessFailed,
       "Cannot open Core AI keyed staging directory");
-  ET_CHECK_OK_OR_RETURN_ERROR(visit_source_tree(source.get(), false));
-  if (!remove) return Error::Ok;
-  ET_CHECK_OK_OR_RETURN_ERROR(visit_source_tree(source.get(), true));
+  ET_CHECK_OK_OR_RETURN_ERROR(visit_source_tree(source.get(), false, mode));
+  if (!remove)
+    return Error::Ok;
+  ET_CHECK_OK_OR_RETURN_ERROR(visit_source_tree(source.get(), true, mode));
   ET_CHECK_OR_RETURN_ERROR(
       storage_call(
           StorageOperation::Remove,

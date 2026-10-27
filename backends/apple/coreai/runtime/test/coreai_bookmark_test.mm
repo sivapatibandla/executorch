@@ -135,6 +135,11 @@ class CoreAIBookmarkRawTest : public CoreAIBookmarkPathTest {
   return ::testing::AssertionSuccess();
 }
 
+NSURL* identity_url(NSURL* root, NSString* key) {
+  return [[root URLByAppendingPathComponent:@"bookmarks"]
+      URLByAppendingPathComponent:[key stringByAppendingString:@".metadata"]];
+}
+
 TEST_F(CoreAIBookmarkIdentityTest, IgnoresFunctionBindingsAndDeliveryLocation) {
   EXPECT_EQ(key.length, 64u);
   manifest.function = @"another_function";
@@ -506,6 +511,371 @@ TEST_F(
   ASSERT_EQ(stat(file.fileSystemRepresentation, &after), 0);
   EXPECT_EQ(before.st_dev, after.st_dev);
   EXPECT_EQ(before.st_ino, after.st_ino);
+}
+
+TEST_F(CoreAIBookmarkIdentityTest, IdentityExcludesContextAndFunction) {
+  NSString* bundle = manifest.path.lastPathComponent;
+  auto identity = bookmark_identity(manifest, bundle);
+  ASSERT_TRUE(identity.ok());
+  EXPECT_EQ(identity.get().length, 64u);
+  manifest.function = @"another_function";
+  manifest.inputs = @[ @"different_input" ];
+  manifest.outputs = @[ @"different_output" ];
+  manifest.hash = @"another_delivery_location";
+  manifest.minimum_version = (NSOperatingSystemVersion){27, 0, 0};
+  auto unchanged = bookmark_identity(manifest, bundle);
+  ASSERT_TRUE(unchanged.ok());
+  EXPECT_TRUE([unchanged.get() isEqual:identity.get()]);
+  auto context = bookmark_key(manifest, @"iOS", @"arch_a");
+  ASSERT_TRUE(context.ok());
+  EXPECT_FALSE([context.get() isEqual:key]);
+}
+
+TEST_F(CoreAIBookmarkIdentityTest, IdentitySeparatesDigestBundleAndKind) {
+  NSString* bundle = manifest.path.lastPathComponent;
+  auto identity = bookmark_identity(manifest, bundle);
+  ASSERT_TRUE(identity.ok());
+  Manifest reweighted = manifest;
+  reweighted.bundle_digests = @{bundle : fixture_identity('2')};
+  auto weights = bookmark_identity(reweighted, bundle);
+  ASSERT_TRUE(weights.ok());
+  EXPECT_FALSE([weights.get() isEqual:identity.get()]);
+  Manifest renamed = manifest;
+  renamed.bundle_digests =
+      @{@"other.aimodel" : manifest.bundle_digests[bundle]};
+  auto bundle_name = bookmark_identity(renamed, @"other.aimodel");
+  ASSERT_TRUE(bundle_name.ok());
+  EXPECT_FALSE([bundle_name.get() isEqual:identity.get()]);
+  Manifest compiled = manifest;
+  compiled.aot_compiled = true;
+  auto kind = bookmark_identity(compiled, bundle);
+  ASSERT_TRUE(kind.ok());
+  EXPECT_FALSE([kind.get() isEqual:identity.get()]);
+}
+
+TEST_F(
+    CoreAIBookmarkIdentityTest,
+    IdentityRejectsUnselectedAndEscapingBundles) {
+  EXPECT_FALSE(bookmark_identity(manifest, @"other.aimodel").ok());
+  Manifest escaped = manifest;
+  escaped.bundle_digests = @{@"../escape" : fixture_identity('1')};
+  EXPECT_FALSE(bookmark_identity(escaped, @"../escape").ok());
+}
+
+TEST_F(CoreAIBookmarkRawTest, EnsurePublishesFullKeyFieldsReadableAsIdentity) {
+  ASSERT_EQ(
+      ensure_bookmark_identity(*locked, manifest, @"macOS", @"arch_b"),
+      Error::Ok);
+  auto identity = read_bookmark_identity(*locked);
+  ASSERT_TRUE(identity.ok());
+  auto expected = bookmark_identity(manifest, manifest.path.lastPathComponent);
+  ASSERT_TRUE(expected.ok());
+  EXPECT_TRUE([identity.get() isEqual:expected.get()]);
+  NSData* bytes = [NSData dataWithContentsOfURL:identity_url(root.url, key)];
+  ASSERT_NE(bytes, nil);
+  id parsed = [NSJSONSerialization JSONObjectWithData:bytes
+                                              options:0
+                                                error:nil];
+  ASSERT_TRUE([parsed isKindOfClass:NSArray.class]);
+  NSArray* fields = parsed;
+  ASSERT_EQ(fields.count, 9u);
+  EXPECT_TRUE([fields[0] isEqual:@"1"]);
+  EXPECT_TRUE([fields[1]
+      isEqual:manifest.bundle_digests[manifest.path.lastPathComponent]]);
+  EXPECT_TRUE([fields[2] isEqual:@"source"]);
+  EXPECT_TRUE([fields[3] isEqual:manifest.path.lastPathComponent]);
+  EXPECT_TRUE([fields[4] isEqual:@"macOS"]);
+  EXPECT_TRUE([fields[5] isEqual:@"arch_b"]);
+  for (id field in fields) {
+    EXPECT_TRUE([field isKindOfClass:NSString.class] && [field length] > 0);
+  }
+  EXPECT_TRUE(no_temporary_bookmarks(root.url));
+}
+
+TEST_F(CoreAIBookmarkRawTest, EnsureReusesMatchingRecordWithoutRepublishing) {
+  ASSERT_EQ(
+      ensure_bookmark_identity(*locked, manifest, @"macOS", @"arch_b"),
+      Error::Ok);
+  NSData* published =
+      [NSData dataWithContentsOfURL:identity_url(root.url, key)];
+  ASSERT_NE(published, nil);
+  for (StorageOperation operation :
+       {StorageOperation::Write, StorageOperation::Rename}) {
+    SCOPED_TRACE(static_cast<int>(operation));
+    StorageFaultScope fault(operation);
+    EXPECT_EQ(
+        ensure_bookmark_identity(*locked, manifest, @"macOS", @"arch_b"),
+        Error::Ok);
+    EXPECT_EQ(fault.hits, 0);
+  }
+  EXPECT_TRUE([[NSData dataWithContentsOfURL:identity_url(root.url, key)]
+      isEqual:published]);
+  EXPECT_TRUE(no_temporary_bookmarks(root.url));
+}
+
+TEST_F(CoreAIBookmarkRawTest, MissingIdentityReadsAsNil) {
+  auto identity = read_bookmark_identity(*locked);
+  ASSERT_TRUE(identity.ok());
+  EXPECT_EQ(identity.get(), nil);
+}
+
+TEST_F(CoreAIBookmarkRawTest, EnsureRepairsCorruptAndMisattributedRecords) {
+  NSURL* metadata = identity_url(root.url, key);
+  NSData* garbage = [@"not metadata" dataUsingEncoding:NSUTF8StringEncoding];
+  ASSERT_TRUE([garbage writeToURL:metadata atomically:NO]);
+  ASSERT_EQ(
+      ensure_bookmark_identity(*locked, manifest, @"macOS", @"arch_b"),
+      Error::Ok);
+  auto repaired = read_bookmark_identity(*locked);
+  ASSERT_TRUE(repaired.ok());
+  auto expected = bookmark_identity(manifest, manifest.path.lastPathComponent);
+  ASSERT_TRUE(expected.ok());
+  EXPECT_TRUE([repaired.get() isEqual:expected.get()]);
+  Manifest reweighted = manifest;
+  reweighted.bundle_digests =
+      @{manifest.path.lastPathComponent : fixture_identity('2')};
+  auto foreign_key = test_bookmark_key(reweighted);
+  ASSERT_TRUE(foreign_key.ok());
+  auto foreign = lock_bookmark(root.url.path, foreign_key.get());
+  ASSERT_TRUE(foreign.ok());
+  ASSERT_EQ(
+      ensure_bookmark_identity(*foreign.get(), reweighted, @"macOS", @"arch_b"),
+      Error::Ok);
+  NSData* foreign_bytes =
+      [NSData dataWithContentsOfURL:identity_url(root.url, foreign_key.get())];
+  ASSERT_NE(foreign_bytes, nil);
+  ASSERT_TRUE([foreign_bytes writeToURL:metadata atomically:NO]);
+  ASSERT_EQ(
+      ensure_bookmark_identity(*locked, manifest, @"macOS", @"arch_b"),
+      Error::Ok);
+  auto restored = read_bookmark_identity(*locked);
+  ASSERT_TRUE(restored.ok());
+  EXPECT_TRUE([restored.get() isEqual:expected.get()]);
+}
+
+TEST_F(CoreAIBookmarkRawTest, RejectsMalformedIdentityRecords) {
+  NSString* bundle = manifest.path.lastPathComponent;
+  NSString* digest = manifest.bundle_digests[bundle];
+  NSArray* base = @[
+    @"1",
+    digest,
+    @"source",
+    bundle,
+    @"macOS",
+    @"arch_b",
+    @"AIModelCache.default",
+    @"default-options-v1",
+    @"persistent"
+  ];
+  NSMutableArray<NSData*>* payloads = [NSMutableArray array];
+  [payloads addObject:[@"not json" dataUsingEncoding:NSUTF8StringEncoding]];
+  for (id document in @[
+         @{@"version" : @"1"},
+         @"metadata",
+         [base subarrayWithRange:NSMakeRange(0, 8)],
+         [base arrayByAddingObject:@"extra"]
+       ]) {
+    [payloads addObject:[NSJSONSerialization
+                            dataWithJSONObject:document
+                                       options:NSJSONWritingFragmentsAllowed
+                                         error:nil]];
+  }
+  NSMutableArray* numeric = [base mutableCopy];
+  numeric[1] = @1;
+  NSMutableArray* empty = [base mutableCopy];
+  empty[4] = @"";
+  NSMutableArray* kind = [base mutableCopy];
+  kind[2] = @"compiled";
+  NSMutableArray* undigestable = [base mutableCopy];
+  undigestable[1] = [@"" stringByPaddingToLength:64
+                                      withString:@"z"
+                                 startingAtIndex:0];
+  NSMutableArray* nested = [base mutableCopy];
+  nested[3] = @"a/b";
+  NSMutableArray* retargeted = [base mutableCopy];
+  retargeted[8] = @"other";
+  for (NSArray* variant in
+       @[ numeric, empty, kind, undigestable, nested, retargeted ]) {
+    [payloads addObject:[NSJSONSerialization dataWithJSONObject:variant
+                                                        options:0
+                                                          error:nil]];
+  }
+  NSURL* metadata = identity_url(root.url, key);
+  for (NSData* payload in payloads) {
+    SCOPED_TRACE(payload.length);
+    ASSERT_NE(payload, nil);
+    ASSERT_TRUE([payload writeToURL:metadata atomically:NO]);
+    EXPECT_EQ(
+        read_bookmark_identity(*locked).error(), Error::InvalidExternalData);
+    EXPECT_TRUE([[NSData dataWithContentsOfURL:metadata] isEqual:payload]);
+  }
+}
+
+TEST_F(CoreAIBookmarkRawTest, RejectsOversizedIdentityRecord) {
+  NSURL* metadata = identity_url(root.url, key);
+  FileDescriptor file(open(
+      metadata.fileSystemRepresentation,
+      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+      0600));
+  ASSERT_GE(file.get(), 0);
+  ASSERT_EQ(ftruncate(file.get(), 128 * 1024 + 1), 0);
+  ASSERT_EQ(close(file.release()), 0);
+  EXPECT_EQ(
+      read_bookmark_identity(*locked).error(), Error::InvalidExternalData);
+  struct stat info {};
+  ASSERT_EQ(lstat(metadata.fileSystemRepresentation, &info), 0);
+  EXPECT_EQ(info.st_size, static_cast<off_t>(128 * 1024 + 1));
+}
+
+TEST_F(CoreAIBookmarkRawTest, RejectsLinkedIdentityRecordWithoutReadingTarget) {
+  NSURL* metadata = identity_url(root.url, key);
+  NSURL* target = [root.url URLByAppendingPathComponent:@"target"];
+  NSData* bytes = [@"target bytes" dataUsingEncoding:NSUTF8StringEncoding];
+  ASSERT_TRUE([bytes writeToURL:target atomically:NO]);
+  ASSERT_EQ(
+      symlink(
+          target.fileSystemRepresentation, metadata.fileSystemRepresentation),
+      0);
+  EXPECT_EQ(
+      read_bookmark_identity(*locked).error(), Error::InvalidExternalData);
+  EXPECT_TRUE(([[NSData dataWithContentsOfURL:target] isEqual:bytes]));
+  struct stat info {};
+  ASSERT_EQ(lstat(metadata.fileSystemRepresentation, &info), 0);
+  EXPECT_TRUE(S_ISLNK(info.st_mode));
+}
+
+TEST_F(CoreAIBookmarkRawTest, RejectsDirectoryAndFifoIdentityRecords) {
+  NSURL* metadata = identity_url(root.url, key);
+  ASSERT_EQ(mkdir(metadata.fileSystemRepresentation, 0700), 0);
+  EXPECT_EQ(
+      read_bookmark_identity(*locked).error(), Error::InvalidExternalData);
+  ASSERT_EQ(rmdir(metadata.fileSystemRepresentation), 0);
+  ASSERT_EQ(mkfifo(metadata.fileSystemRepresentation, 0600), 0);
+  EXPECT_EQ(
+      read_bookmark_identity(*locked).error(), Error::InvalidExternalData);
+}
+
+TEST_F(CoreAIBookmarkRawTest, RemoveIdentityPreservesBookmarkAndStaging) {
+  NSData* bytes = [@"bookmark" dataUsingEncoding:NSUTF8StringEncoding];
+  ASSERT_EQ(write_bookmark(*locked, bytes), Error::Ok);
+  ASSERT_EQ(
+      ensure_bookmark_identity(*locked, manifest, @"macOS", @"arch_b"),
+      Error::Ok);
+  auto staging = prepare_bookmark_staging(*locked);
+  ASSERT_TRUE(staging.ok());
+  ASSERT_EQ(remove_bookmark_identity(*locked), Error::Ok);
+  EXPECT_FALSE([NSFileManager.defaultManager
+      fileExistsAtPath:identity_url(root.url, key).path]);
+  EXPECT_TRUE(bookmark_bytes_equal(*locked, bytes));
+  EXPECT_TRUE([NSFileManager.defaultManager fileExistsAtPath:staging.get()]);
+  auto reread = read_bookmark_identity(*locked);
+  ASSERT_TRUE(reread.ok());
+  EXPECT_EQ(reread.get(), nil);
+  EXPECT_EQ(remove_bookmark_identity(*locked), Error::Ok);
+}
+
+TEST_F(CoreAIBookmarkPathTest, EnsureRejectsSelectedOrContextOutsideHeldKey) {
+  auto locked = lock_bookmark(root.url.path, key);
+  ASSERT_TRUE(locked.ok());
+  Manifest reweighted = manifest;
+  reweighted.bundle_digests =
+      @{manifest.path.lastPathComponent : fixture_identity('2')};
+  EXPECT_EQ(
+      ensure_bookmark_identity(*locked.get(), reweighted, @"macOS", @"arch_b"),
+      Error::InvalidArgument);
+  EXPECT_EQ(
+      ensure_bookmark_identity(*locked.get(), manifest, @"iOS", @"arch_b"),
+      Error::InvalidArgument);
+  EXPECT_EQ(
+      ensure_bookmark_identity(*locked.get(), manifest, @"macOS", @"arch_a"),
+      Error::InvalidArgument);
+  EXPECT_FALSE([NSFileManager.defaultManager
+      fileExistsAtPath:identity_url(root.url, key).path]);
+}
+
+TEST_F(CoreAIBookmarkPathTest, EnsureRejectsStagingOnlyLock) {
+  NSURL* staged = [[root.url URLByAppendingPathComponent:@"staging"]
+      URLByAppendingPathComponent:key];
+  ASSERT_TRUE([NSFileManager.defaultManager createDirectoryAtURL:staged
+                                     withIntermediateDirectories:YES
+                                                      attributes:nil
+                                                           error:nil]);
+  auto existing = lock_bookmark(root.url.path, key, false);
+  ASSERT_TRUE(existing.ok());
+  ASSERT_NE(existing.get(), nullptr);
+  EXPECT_EQ(
+      ensure_bookmark_identity(*existing.get(), manifest, @"macOS", @"arch_b"),
+      Error::InvalidArgument);
+  EXPECT_FALSE([NSFileManager.defaultManager
+      fileExistsAtPath:identity_url(root.url, key).path]);
+}
+
+TEST_F(CoreAIBookmarkPathTest, RemoveIdentityThroughStagingOnlyLockSucceeds) {
+  NSURL* staged = [[root.url URLByAppendingPathComponent:@"staging"]
+      URLByAppendingPathComponent:key];
+  ASSERT_TRUE([NSFileManager.defaultManager createDirectoryAtURL:staged
+                                     withIntermediateDirectories:YES
+                                                      attributes:nil
+                                                           error:nil]);
+  auto existing = lock_bookmark(root.url.path, key, false);
+  ASSERT_TRUE(existing.ok());
+  ASSERT_NE(existing.get(), nullptr);
+  EXPECT_EQ(remove_bookmark_identity(*existing.get()), Error::Ok);
+}
+
+TEST_F(CoreAIBookmarkPathTest, RejectsMetadataWrittenForAnotherKey) {
+  Manifest reweighted = manifest;
+  reweighted.bundle_digests =
+      @{manifest.path.lastPathComponent : fixture_identity('2')};
+  auto foreign_key = test_bookmark_key(reweighted);
+  ASSERT_TRUE(foreign_key.ok());
+  auto foreign = lock_bookmark(root.url.path, foreign_key.get());
+  ASSERT_TRUE(foreign.ok());
+  ASSERT_EQ(
+      ensure_bookmark_identity(*foreign.get(), reweighted, @"macOS", @"arch_b"),
+      Error::Ok);
+  NSData* foreign_bytes =
+      [NSData dataWithContentsOfURL:identity_url(root.url, foreign_key.get())];
+  ASSERT_NE(foreign_bytes, nil);
+  auto locked = lock_bookmark(root.url.path, key);
+  ASSERT_TRUE(locked.ok());
+  ASSERT_TRUE([foreign_bytes writeToURL:identity_url(root.url, key)
+                             atomically:NO]);
+  EXPECT_EQ(
+      read_bookmark_identity(*locked.get()).error(),
+      Error::InvalidExternalData);
+  EXPECT_TRUE([[NSData dataWithContentsOfURL:identity_url(root.url, key)]
+      isEqual:foreign_bytes]);
+}
+
+TEST_F(CoreAIBookmarkPathTest, MetadataOnlyEntriesListLockAndRemove) {
+  auto locked = lock_bookmark(root.url.path, key);
+  ASSERT_TRUE(locked.ok());
+  ASSERT_EQ(
+      ensure_bookmark_identity(*locked.get(), manifest, @"macOS", @"arch_b"),
+      Error::Ok);
+  locked.get().reset();
+  auto inventory = inventory_bookmark_keys(root.url.path);
+  ASSERT_TRUE(inventory.ok());
+  EXPECT_TRUE([inventory.get() containsObject:key]);
+  auto existing = lock_bookmark(root.url.path, key, false);
+  ASSERT_TRUE(existing.ok());
+  ASSERT_NE(existing.get(), nullptr);
+  auto identity = read_bookmark_identity(*existing.get());
+  ASSERT_TRUE(identity.ok());
+  auto expected = bookmark_identity(manifest, manifest.path.lastPathComponent);
+  ASSERT_TRUE(expected.ok());
+  EXPECT_TRUE([identity.get() isEqual:expected.get()]);
+  EXPECT_TRUE(bookmark_bytes_equal(*existing.get(), nil));
+  ASSERT_EQ(remove_bookmark_identity(*existing.get()), Error::Ok);
+  EXPECT_FALSE([NSFileManager.defaultManager
+      fileExistsAtPath:identity_url(root.url, key).path]);
+  auto relisted = inventory_bookmark_keys(root.url.path);
+  ASSERT_TRUE(relisted.ok());
+  EXPECT_FALSE([relisted.get() containsObject:key]);
+  auto absent = lock_bookmark(root.url.path, key, false);
+  ASSERT_TRUE(absent.ok());
+  EXPECT_EQ(absent.get(), nullptr);
 }
 
 } // namespace

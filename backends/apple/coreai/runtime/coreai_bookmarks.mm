@@ -42,30 +42,53 @@ bool digest(id value) {
 NSString* bookmark_name(NSString* key) {
   return [key stringByAppendingString:@".bookmark"];
 }
-} // namespace
 
-Result<NSString*> bookmark_key(
+constexpr size_t kIdentityByteLimit = 128 * 1024;
+NSString* identity_name(NSString* key) {
+  return [key stringByAppendingString:@".metadata"];
+}
+
+Result<NSArray<NSString*>*> identity_fields(
     const Manifest& selected,
-    NSString* platform,
-    NSString* architecture) {
-  NSString* bundle = selected.path.lastPathComponent;
+    NSString* bundle) {
+  ET_CHECK_OR_RETURN_ERROR(
+      component(bundle),
+      DelegateInvalidCompatibility,
+      "Invalid Core AI bundle name");
   NSString* exported_digest = selected.bundle_digests[bundle];
   ET_CHECK_OR_RETURN_ERROR(
-      digest(exported_digest) && component(bundle) && text(platform) &&
-          text(architecture),
+      digest(exported_digest),
       DelegateInvalidCompatibility,
-      "Core AI bookmark key requires a selected bundle and SDK architecture");
-  NSArray* fields = @[
+      "Missing Core AI bundle digest");
+  return @[
     @"1",
     exported_digest,
     selected.aot_compiled ? @"aot" : @"source",
-    bundle,
+    bundle
+  ];
+}
+
+Result<NSArray<NSString*>*> key_fields(
+    const Manifest& selected,
+    NSString* platform,
+    NSString* architecture) {
+  auto identity = identity_fields(selected, selected.path.lastPathComponent);
+  if (!identity.ok())
+    return identity.error();
+  ET_CHECK_OR_RETURN_ERROR(
+      text(platform) && text(architecture),
+      DelegateInvalidCompatibility,
+      "Missing Core AI cache context");
+  return [identity.get() arrayByAddingObjectsFromArray:@[
     platform,
     architecture,
     @"AIModelCache.default",
     @"default-options-v1",
     @"persistent"
-  ];
+  ]];
+}
+
+Result<NSString*> hash_fields(NSArray<NSString*>* fields) {
   NSData* encoded = [NSJSONSerialization dataWithJSONObject:fields
                                                     options:0
                                                       error:nil];
@@ -77,6 +100,27 @@ Result<NSString*> bookmark_key(
   for (unsigned char byte : bytes)
     [key appendFormat:@"%02x", byte];
   return [key copy];
+}
+
+} // namespace
+
+Result<NSString*> bookmark_identity(
+    const Manifest& manifest,
+    NSString* bundle) {
+  auto fields = identity_fields(manifest, bundle);
+  if (!fields.ok())
+    return fields.error();
+  return hash_fields(fields.get());
+}
+
+Result<NSString*> bookmark_key(
+    const Manifest& selected,
+    NSString* platform,
+    NSString* architecture) {
+  auto fields = key_fields(selected, platform, architecture);
+  if (!fields.ok())
+    return fields.error();
+  return hash_fields(fields.get());
 }
 
 namespace {
@@ -131,19 +175,23 @@ Result<bool> entry_exists(int root_fd, NSString* key) {
     FileDescriptor child(opened.get());
     if (child.get() < 0)
       continue;
-    NSString* entry = [name isEqual:@"bookmarks"] ? bookmark_name(key) : key;
-    struct stat info;
-    const int result = retry_eintr([&] {
-      return fstatat(
-          child.get(),
-          entry.fileSystemRepresentation,
-          &info,
-          AT_SYMLINK_NOFOLLOW);
-    });
-    if (result == 0)
-      return true;
-    ET_CHECK_OR_RETURN_ERROR(
-        errno == ENOENT, AccessFailed, "Cannot inspect Core AI cache entry");
+    NSArray<NSString*>* entries = [name isEqual:@"bookmarks"]
+        ? @[ bookmark_name(key), identity_name(key) ]
+        : @[ key ];
+    for (NSString* entry in entries) {
+      struct stat info;
+      const int result = retry_eintr([&] {
+        return fstatat(
+            child.get(),
+            entry.fileSystemRepresentation,
+            &info,
+            AT_SYMLINK_NOFOLLOW);
+      });
+      if (result == 0)
+        return true;
+      ET_CHECK_OR_RETURN_ERROR(
+          errno == ENOENT, AccessFailed, "Cannot inspect Core AI cache entry");
+    }
   }
   return false;
 }
@@ -171,33 +219,47 @@ Result<NSString*> resolve_bookmark_root(NSString* path, bool create) {
 
 Result<NSArray<NSString*>*> inventory_bookmark_keys(NSString* root) {
   auto resolved = resolve_bookmark_root(root, false);
-  if (!resolved.ok()) return resolved.error();
+  if (!resolved.ok())
+    return resolved.error();
   auto opened = open_root(resolved.get());
-  if (!opened.ok()) return opened.error();
+  if (!opened.ok())
+    return opened.error();
   FileDescriptor directory(opened.get());
-  if (directory.get() < 0) return @[];
+  if (directory.get() < 0)
+    return @[];
   NSMutableSet<NSString*>* keys = [NSMutableSet set];
   for (NSString* name in @[ @"bookmarks", @"staging" ]) {
     auto child_result = open_child(directory.get(), name, false);
-    if (!child_result.ok()) return child_result.error();
+    if (!child_result.ok())
+      return child_result.error();
     FileDescriptor child(child_result.get());
-    if (child.get() < 0) continue;
+    if (child.get() < 0)
+      continue;
     auto children = storage_children(child.get(), true);
-    if (!children.ok()) return children.error();
+    if (!children.ok())
+      return children.error();
     for (NSString* entry in children.get()) {
       NSString* key = entry;
       if ([name isEqual:@"bookmarks"]) {
-        if (![entry hasSuffix:@".bookmark"]) continue;
-        key = [entry substringToIndex:entry.length - @".bookmark".length];
+        NSString* suffix =
+            [entry hasSuffix:@".bookmark"] ? @".bookmark" : @".metadata";
+        if (![entry hasSuffix:suffix])
+          continue;
+        key = [entry substringToIndex:entry.length - suffix.length];
       }
-      if (digest(key)) [keys addObject:key];
+      if (digest(key))
+        [keys addObject:key];
     }
   }
   return [keys.allObjects sortedArrayUsingSelector:@selector(compare:)];
 }
 
-BookmarkLock::BookmarkLock(int root, int bookmarks, int file,
-                           NSString* root_path, NSString* key)
+BookmarkLock::BookmarkLock(
+    int root,
+    int bookmarks,
+    int file,
+    NSString* root_path,
+    NSString* key)
     : root_(root),
       bookmarks_(bookmarks),
       file_(file),
@@ -267,24 +329,47 @@ lock_bookmark(NSString* root, NSString* key, bool create) {
       [key copy]));
 }
 
-Result<NSData*> read_bookmark(const BookmarkLock& lock) {
-  if (lock.bookmarks_.get() < 0)
+namespace {
+Result<NSData*>
+read_record(int directory, NSString* name, size_t limit, bool maintenance) {
+  if (directory < 0)
     return static_cast<NSData*>(nil);
+  if (maintenance) {
+    struct stat entry;
+    const int inspected = retry_eintr([&] {
+      return fstatat(
+          directory,
+          name.fileSystemRepresentation,
+          &entry,
+          AT_SYMLINK_NOFOLLOW);
+    });
+    if (inspected < 0 && errno == ENOENT)
+      return static_cast<NSData*>(nil);
+    ET_CHECK_OR_RETURN_ERROR(
+        inspected == 0, AccessFailed, "Cannot inspect Core AI cache record");
+    if (!S_ISREG(entry.st_mode))
+      return Error::InvalidExternalData;
+  }
   FileDescriptor file(retry_eintr([&] {
     return openat(
-        lock.bookmarks_.get(),
-        bookmark_name(lock.key_).fileSystemRepresentation,
+        directory,
+        name.fileSystemRepresentation,
         O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   }));
   if (file.get() < 0 && errno == ENOENT)
     return static_cast<NSData*>(nil);
+  if (file.get() < 0 && errno == ELOOP && maintenance)
+    return Error::InvalidExternalData;
   ET_CHECK_OR_RETURN_ERROR(
       file.get() >= 0, AccessFailed, "Cannot open Core AI bookmark");
   struct stat info;
   ET_CHECK_OR_RETURN_ERROR(
-      fstat(file.get(), &info) == 0 && S_ISREG(info.st_mode) &&
-          info.st_size > 0 &&
-          static_cast<uint64_t>(info.st_size) <= kBookmarkByteLimit,
+      fstat(file.get(), &info) == 0,
+      AccessFailed,
+      "Cannot inspect Core AI bookmark");
+  ET_CHECK_OR_RETURN_ERROR(
+      S_ISREG(info.st_mode) && info.st_size > 0 &&
+          static_cast<uint64_t>(info.st_size) <= limit,
       InvalidExternalData,
       "Invalid Core AI bookmark file");
   NSMutableData* bytes = [NSMutableData dataWithLength:info.st_size];
@@ -303,6 +388,100 @@ Result<NSData*> read_bookmark(const BookmarkLock& lock) {
   return bytes;
 }
 
+} // namespace
+
+Result<NSData*> read_bookmark(const BookmarkLock& lock, bool maintenance) {
+  return read_record(
+      lock.bookmarks_.get(),
+      bookmark_name(lock.key_),
+      kBookmarkByteLimit,
+      maintenance);
+}
+
+Result<NSString*> read_bookmark_identity(const BookmarkLock& lock) {
+  auto bytes = read_record(
+      lock.bookmarks_.get(),
+      identity_name(lock.key_),
+      kIdentityByteLimit,
+      true);
+  if (!bytes.ok())
+    return bytes.error();
+  if (bytes.get() == nil)
+    return static_cast<NSString*>(nil);
+  id parsed = [NSJSONSerialization JSONObjectWithData:bytes.get()
+                                              options:0
+                                                error:nil];
+  if (![parsed isKindOfClass:NSArray.class] || [parsed count] != 9)
+    return Error::InvalidExternalData;
+  NSArray<NSString*>* fields = parsed;
+  for (id field in fields) {
+    if (!text(field))
+      return Error::InvalidExternalData;
+  }
+  if (![fields[2] isEqual:@"source"] && ![fields[2] isEqual:@"aot"])
+    return Error::InvalidExternalData;
+  Manifest selected;
+  selected.path = fields[3];
+  selected.bundle_digests = @{fields[3] : fields[1]};
+  selected.aot_compiled = [fields[2] isEqual:@"aot"];
+  auto expected = key_fields(selected, fields[4], fields[5]);
+  if (!expected.ok() || ![expected.get() isEqual:fields])
+    return Error::InvalidExternalData;
+  auto key = hash_fields(fields);
+  if (!key.ok())
+    return key.error();
+  if (![key.get() isEqual:lock.key_])
+    return Error::InvalidExternalData;
+  return bookmark_identity(selected, fields[3]);
+}
+
+Error ensure_bookmark_identity(
+    const BookmarkLock& lock,
+    const Manifest& selected,
+    NSString* platform,
+    NSString* architecture) {
+  ET_CHECK_OR_RETURN_ERROR(
+      lock.bookmarks_.get() >= 0,
+      InvalidArgument,
+      "Cannot attribute a staging-only lock");
+  auto fields = key_fields(selected, platform, architecture);
+  if (!fields.ok())
+    return fields.error();
+  auto key = hash_fields(fields.get());
+  if (!key.ok())
+    return key.error();
+  ET_CHECK_OR_RETURN_ERROR(
+      [key.get() isEqual:lock.key_],
+      InvalidArgument,
+      "Core AI cache identity does not match key");
+  NSData* encoded = [NSJSONSerialization dataWithJSONObject:fields.get()
+                                                    options:0
+                                                      error:nil];
+  ET_CHECK_OR_RETURN_ERROR(
+      encoded != nil && encoded.length <= kIdentityByteLimit,
+      InvalidExternalData,
+      "Invalid Core AI cache identity");
+  auto existing = read_record(
+      lock.bookmarks_.get(),
+      identity_name(lock.key_),
+      kIdentityByteLimit,
+      true);
+  if (!existing.ok() && existing.error() != Error::InvalidExternalData)
+    return existing.error();
+  if (existing.ok() && [existing.get() isEqual:encoded]) {
+    // A prior publication may have failed its post-rename flush.
+    return sync_storage_directory(lock.bookmarks_.get(), true);
+  }
+  return publish_storage_data(
+      lock.bookmarks_.get(), identity_name(lock.key_), encoded);
+}
+
+Error remove_bookmark_identity(const BookmarkLock& lock) {
+  if (lock.bookmarks_.get() < 0)
+    return Error::Ok;
+  return remove_storage_entry(lock.bookmarks_.get(), identity_name(lock.key_));
+}
+
 Error write_bookmark(const BookmarkLock& lock, NSData* data) {
   ET_CHECK_OR_RETURN_ERROR(
       [data isKindOfClass:NSData.class] && data.length > 0 &&
@@ -318,20 +497,16 @@ Error write_bookmark(const BookmarkLock& lock, NSData* data) {
 }
 
 Error remove_bookmark(const BookmarkLock& lock) {
-  if (lock.bookmarks_.get() < 0) return Error::Ok;
-  ET_CHECK_OR_RETURN_ERROR(storage_fault(StorageOperation::Remove) == 0,
-                           AccessFailed,
-                           "Core AI bookmark removal interrupted");
-  ET_CHECK_OR_RETURN_ERROR(
-      unlinkat(lock.bookmarks_.get(),
-               bookmark_name(lock.key_).fileSystemRepresentation, 0) == 0 ||
-          errno == ENOENT,
-      AccessFailed, "Cannot remove Core AI bookmark");
-  return sync_storage_directory(lock.bookmarks_.get());
+  if (lock.bookmarks_.get() < 0)
+    return Error::Ok;
+  return remove_storage_entry(lock.bookmarks_.get(), bookmark_name(lock.key_));
 }
 
-Error remove_bookmark_staging(const BookmarkLock& lock, bool remove) {
-  return remove_storage_staging(lock.root_.get(), lock.key_, remove);
+Error remove_bookmark_staging(
+    const BookmarkLock& lock,
+    bool remove,
+    StorageRemovalMode mode) {
+  return remove_storage_staging(lock.root_.get(), lock.key_, remove, mode);
 }
 
 Result<NSString*> prepare_bookmark_staging(const BookmarkLock& lock) {
