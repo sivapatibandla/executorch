@@ -38,11 +38,14 @@ runtime::Result<Manifest> select_assets(
 // The key is 64 lowercase hex characters identifying the selected export digest
 // and bundle name, optionally including platform or SDK context.
 // Bundles are published at source_root/key/bundle. Reuse validates structure,
-// not contents, and fully flushes source_root before returning.
+// not contents, and fully flushes source_root before returning. When
+// replace_corrupt is set, damaged regular-file trees may be removed and
+// rebuilt.
 runtime::Result<NSURL*> prepare_source_bundle(
     const Manifest& manifest,
     const runtime::NamedDataMap* named_data,
     NSString* source_root,
-    NSString* key);
+    NSString* key,
+    bool replace_corrupt = false);
 
 } // namespace executorch::backends::coreai

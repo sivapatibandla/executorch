@@ -445,7 +445,8 @@ Result<NSURL*> prepare_source_bundle(
     const Manifest& manifest,
     const runtime::NamedDataMap* named_data,
     NSString* source_root,
-    NSString* key) {
+    NSString* key,
+    bool replace_corrupt) {
   ET_CHECK_OR_RETURN_ERROR(
       relative_path(manifest.path),
       InvalidProgram,
@@ -485,11 +486,13 @@ Result<NSURL*> prepare_source_bundle(
     ET_CHECK_OK_OR_RETURN_ERROR(sync_storage_directory(root_fd.get(), true));
     return model_url;
   }
-  // Recovery sources may still be in use by a previously acquired SDK model.
-  ET_CHECK_OR_RETURN_ERROR(
-      *state == EntryState::Missing,
-      InvalidExternalData,
-      "Cannot replace a damaged Core AI stored bundle");
+  if (*state == EntryState::Corrupt) {
+    ET_CHECK_OR_RETURN_ERROR(
+        replace_corrupt && named_data != nullptr,
+        InvalidExternalData,
+        "Cannot replace a damaged Core AI stored bundle");
+    ET_CHECK_OK_OR_RETURN_ERROR(remove_storage_source(root_fd.get(), key));
+  }
   ET_CHECK_OR_RETURN_ERROR(
       named_data != nullptr,
       InvalidProgram,

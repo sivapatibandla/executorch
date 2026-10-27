@@ -41,6 +41,8 @@ runtime::Result<NSArray<NSString*>*> storage_children(
     bool skip_invalid_names = false);
 // The caller holds the key's lock. Missing staging is already removed.
 runtime::Error remove_storage_staging(int root_fd, NSString* key);
+// Removes a keyed child of source_root_fd under the same lock requirement.
+runtime::Error remove_storage_source(int source_root_fd, NSString* key);
 
 enum class StorageOperation {
   Write,

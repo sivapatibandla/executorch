@@ -332,16 +332,19 @@ Error sync_storage_directory(int fd, bool full_sync) {
   return Error::Ok;
 }
 
+namespace {
+bool storage_key(NSString* key) {
+  return [key isKindOfClass:NSString.class] && key.length == 64 &&
+      [key rangeOfCharacterFromSet:[[NSCharacterSet
+                                       characterSetWithCharactersInString:
+                                           @"0123456789abcdef"] invertedSet]]
+          .location == NSNotFound;
+}
+} // namespace
+
 Error remove_storage_staging(int root_fd, NSString* key) {
   ET_CHECK_OR_RETURN_ERROR(
-      [key isKindOfClass:NSString.class] && key.length == 64 &&
-          [key rangeOfCharacterFromSet:
-                   [[NSCharacterSet
-                       characterSetWithCharactersInString:@"0123456789abcdef"]
-                       invertedSet]]
-                  .location == NSNotFound,
-      InvalidArgument,
-      "Invalid Core AI staging key");
+      storage_key(key), InvalidArgument, "Invalid Core AI staging key");
   FileDescriptor staging(retry_eintr([&] {
     return openat(
         root_fd, "staging", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -352,10 +355,16 @@ Error remove_storage_staging(int root_fd, NSString* key) {
       staging.get() >= 0,
       AccessFailed,
       "Cannot open Core AI staging directory");
+  return remove_storage_source(staging.get(), key);
+}
+
+Error remove_storage_source(int source_root_fd, NSString* key) {
+  ET_CHECK_OR_RETURN_ERROR(
+      storage_key(key), InvalidArgument, "Invalid Core AI staging key");
   struct stat info;
   const int inspected = retry_eintr([&] {
     return fstatat(
-        staging.get(),
+        source_root_fd,
         key.fileSystemRepresentation,
         &info,
         AT_SYMLINK_NOFOLLOW);
@@ -372,7 +381,7 @@ Error remove_storage_staging(int root_fd, NSString* key) {
       "Core AI keyed staging entry is not a directory");
   FileDescriptor source(retry_eintr([&] {
     return openat(
-        staging.get(),
+        source_root_fd,
         key.fileSystemRepresentation,
         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   }));
@@ -387,11 +396,11 @@ Error remove_storage_staging(int root_fd, NSString* key) {
           StorageOperation::Remove,
           [&] {
             return unlinkat(
-                staging.get(), key.fileSystemRepresentation, AT_REMOVEDIR);
+                source_root_fd, key.fileSystemRepresentation, AT_REMOVEDIR);
           }) == 0,
       AccessFailed,
       "Cannot remove Core AI keyed staging directory");
-  return sync_storage_directory(staging.get());
+  return sync_storage_directory(source_root_fd);
 }
 
 Error write_storage_file(
