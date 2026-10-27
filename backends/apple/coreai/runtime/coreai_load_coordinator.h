@@ -12,6 +12,17 @@
 
 namespace executorch::backends::coreai {
 
+struct RuntimeAssets {
+  Manifest manifest;
+  NSString* platform;
+  NSString* architecture;
+};
+
+// Reuse a resolved architecture when selecting multiple delegates in one PTE.
+runtime::Result<RuntimeAssets> select_runtime_assets(
+    const Manifest& manifest,
+    NSString* architecture = nil);
+
 // The key lock outlives all SDK callbacks and raw bookmark publication.
 // Cleanup after a restore hit or durable publication is best-effort.
 runtime::Result<id<ETCoreAIPreparedModel>> acquire_bookmark_model(
@@ -20,12 +31,6 @@ runtime::Result<id<ETCoreAIPreparedModel>> acquire_bookmark_model(
     NSString* root,
     NSString* platform,
     NSString* architecture,
-    id<ETCoreAIModelLoading> loader);
-
-// Deletes only the saved current SDK entry, not historical entries or sources.
-runtime::Error evict_bookmark_model(
-    NSString* root,
-    NSString* key,
     id<ETCoreAIModelLoading> loader);
 
 // Callers must keep affected loads and sessions quiescent across processes.

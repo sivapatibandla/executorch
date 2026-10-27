@@ -49,12 +49,17 @@ Error ensure_excluded_from_backup(NSURL* directory) {
 }
 
 Result<NSString*> default_coreai_assets_root() {
-  NSURL* caches =
-      [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory
-                                           inDomains:NSUserDomainMask]
-          .firstObject;
-  ET_CHECK_OR_RETURN_ERROR(
-      caches.isFileURL, AccessFailed, "Cannot resolve Core AI cache directory");
+#if defined(COREAI_ASSETS_TESTING) && COREAI_ASSETS_TESTING
+  if (testing::default_assets_root_override != nullptr) {
+    return
+        [NSString stringWithUTF8String:testing::default_assets_root_override];
+  }
+#endif
+  NSURL* caches = [NSFileManager.defaultManager
+                      URLsForDirectory:NSCachesDirectory
+                             inDomains:NSUserDomainMask].firstObject;
+  ET_CHECK_OR_RETURN_ERROR(caches.isFileURL, AccessFailed,
+                           "Cannot resolve Core AI cache directory");
   return [caches.path stringByAppendingPathComponent:@"executorch_coreai"];
 }
 
@@ -97,6 +102,7 @@ Result<NSString*> prepare_storage_root(NSString* path, bool create) {
 #if defined(COREAI_ASSETS_TESTING) && COREAI_ASSETS_TESTING
 namespace testing {
 thread_local StorageFaultCallback storage_fault_callback = nullptr;
+thread_local const char* default_assets_root_override = nullptr;
 }
 
 int storage_fault(StorageOperation operation) {

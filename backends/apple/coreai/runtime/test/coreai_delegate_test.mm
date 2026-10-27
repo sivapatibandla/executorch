@@ -16,8 +16,11 @@
 #include <type_traits>
 
 #include "coreai_bookmark_fixture.h"
+#include "coreai_cache.h"
 #import "coreai_fake_loader.h"
+#include "coreai_pte_fixture.h"
 #include "coreai_source_fixture.h"
+#include "coreai_storage.h"
 
 namespace executorch::backends::coreai::testing {
 namespace {
@@ -109,6 +112,125 @@ class DelegateFixture final {
   const BackendInterface* backend_;
   ScopedFakeBridgeState& bridge_;
 };
+
+class DefaultAssetsRootScope final {
+ public:
+  explicit DefaultAssetsRootScope(NSString* root)
+      : root_([root copy]), previous_(default_assets_root_override) {
+    default_assets_root_override = root_.UTF8String;
+  }
+  ~DefaultAssetsRootScope() {
+    default_assets_root_override = previous_;
+  }
+  DefaultAssetsRootScope(const DefaultAssetsRootScope&) = delete;
+  DefaultAssetsRootScope& operator=(const DefaultAssetsRootScope&) = delete;
+
+ private:
+  NSString* root_;
+  const char* previous_;
+};
+
+TEST_F(CoreAIDelegateTest, PteClearingFindsLoadedSourceAndAotEntries) {
+  @autoreleasepool {
+    for (bool aot : {false, true}) {
+      for (NSString* arch in @[ @"arch_a", @"arch_b" ]) {
+        SCOPED_TRACE(aot ? "AOT" : "source");
+        SCOPED_TRACE(arch.UTF8String);
+        bridge.state().device_architecture = arch;
+        BookmarkLoaderScope fake;
+        DelegateFixture fixture(
+            backend, bridge, aot ? aot_manifest_dict() : manifest_dict());
+        if (aot)
+          aot_data(fixture.data, arch);
+        const int queries = bridge.state().architecture_queries.load();
+        ASSERT_EQ(fixture.init(), Error::Ok);
+        fixture.reset();
+        auto keys = inventory_bookmark_keys(fixture.storage.url.path);
+        ASSERT_TRUE(keys.ok());
+        ASSERT_EQ(keys.get().count, 1);
+        auto bookmark = saved_bookmark(fixture.storage.url, keys.get()[0]);
+        ASSERT_TRUE(bookmark.ok());
+        ASSERT_NE(bookmark.get(), nil);
+        ASSERT_NE(fake.loader.models[bookmark.get()], nil);
+        FBSyntheticPTE pte(
+            {{"forward", {{"CoreAIBackend", fixture.json}}},
+             {"other", {{"CoreAIBackend", fixture.json, true}}}});
+        ASSERT_EQ(
+            clear_cache_for_pte(pte, fixture.storage.url.path.UTF8String),
+            Error::Ok);
+        EXPECT_EQ(bridge.state().architecture_queries.load(), queries + 2);
+        EXPECT_EQ(fake.loader->specializations.load(), 1);
+        EXPECT_EQ(fake.loader->evictions.load(), 1);
+        EXPECT_EQ(fake.loader.models[bookmark.get()], nil);
+        auto remaining = inventory_bookmark_keys(fixture.storage.url.path);
+        ASSERT_TRUE(remaining.ok());
+        EXPECT_EQ(remaining.get().count, 0);
+        EXPECT_TRUE(pte.check_released());
+      }
+    }
+  }
+}
+
+TEST_F(CoreAIDelegateTest, DefaultRootClearingMatchesDefaultInitialization) {
+  @autoreleasepool {
+    for (int api = 0; api < 4; ++api) {
+      SCOPED_TRACE(api);
+      BookmarkLoaderScope fake;
+      DelegateFixture fixture(backend, bridge);
+      ASSERT_NE(fixture.storage.url, nil);
+      DefaultAssetsRootScope default_root(fixture.storage.url.path);
+      ASSERT_EQ(fixture.init_with_options({}), Error::Ok);
+      fixture.reset();
+      auto keys = inventory_bookmark_keys(fixture.storage.url.path);
+      ASSERT_TRUE(keys.ok());
+      ASSERT_EQ(keys.get().count, 1);
+      FBSyntheticPTE pte({{"forward", {{"CoreAIBackend", fixture.json}}}});
+      for (const char* invalid : {"", "relative", "\xff"}) {
+        EXPECT_EQ(clear_cache(invalid), Error::InvalidArgument);
+        EXPECT_EQ(clear_cache_for_pte(pte, invalid), Error::InvalidArgument);
+      }
+      EXPECT_EQ(fake.loader->evictions.load(), 0);
+      switch (api) {
+        case 0:
+          ASSERT_EQ(clear_cache(), Error::Ok);
+          break;
+        case 1:
+          ASSERT_EQ(clear_cache(nullptr), Error::Ok);
+          break;
+        case 2:
+          ASSERT_EQ(clear_cache_for_pte(pte), Error::Ok);
+          break;
+        case 3:
+          ASSERT_EQ(clear_cache_for_pte(pte, nullptr), Error::Ok);
+          break;
+      }
+      EXPECT_EQ(fake.loader->evictions.load(), 1);
+      EXPECT_EQ(fake.loader.models.count, 0);
+      auto remaining = inventory_bookmark_keys(fixture.storage.url.path);
+      ASSERT_TRUE(remaining.ok());
+      EXPECT_EQ(remaining.get().count, 0);
+      EXPECT_TRUE(pte.check_released());
+    }
+  }
+}
+
+TEST_F(CoreAIDelegateTest, MissingDefaultRootClearingDoesNotCreateStorage) {
+  @autoreleasepool {
+    BookmarkDirectory root;
+    ASSERT_NE(root.url, nil);
+    NSString* missing =
+        [root.url.path stringByAppendingPathComponent:@"missing"];
+    DefaultAssetsRootScope default_root(missing);
+    bridge.state().available = false;
+    EXPECT_EQ(clear_cache(), Error::Ok);
+    FBSyntheticPTE empty({});
+    EXPECT_EQ(clear_cache_for_pte(empty), Error::Ok);
+    EXPECT_FALSE([NSFileManager.defaultManager fileExistsAtPath:missing]);
+    EXPECT_EQ(bridge.state().architecture_queries.load(), 0);
+    EXPECT_EQ(bridge.state().loaders.load(), 0);
+    EXPECT_TRUE(empty.check_released());
+  }
+}
 
 struct FloatTensors {
   float input[2] = {3, 7};

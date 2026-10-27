@@ -66,6 +66,8 @@ int storage_fault(StorageOperation operation);
 namespace testing {
 using StorageFaultCallback = int (*)(StorageOperation);
 extern thread_local StorageFaultCallback storage_fault_callback;
+// Borrowed for the scope of tests that must not access the real default cache.
+extern thread_local const char* default_assets_root_override;
 } // namespace testing
 #else
 constexpr int storage_fault(StorageOperation) {

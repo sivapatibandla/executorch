@@ -8,6 +8,9 @@
 #import "coreai_load_coordinator.h"
 #import "coreai_storage.h"
 
+#include <TargetConditionals.h>
+#include <utility>
+
 namespace executorch::backends::coreai {
 namespace {
 using runtime::Error;
@@ -104,6 +107,34 @@ Error evict_one(id<ETCoreAIModelLoading> loader, NSData* bookmark) {
 }
 }  // namespace
 
+Result<RuntimeAssets> select_runtime_assets(
+    const Manifest& manifest,
+    NSString* architecture) {
+  ET_CHECK_OR_RETURN_ERROR(
+      [NSProcessInfo.processInfo
+          isOperatingSystemAtLeastVersion:manifest.minimum_version],
+      DelegateInvalidCompatibility,
+      "Core AI model requires a newer operating system");
+  ET_CHECK_OR_RETURN_ERROR(
+      ETCoreAIIsAvailable(),
+      NotSupported,
+      "Core AI requires macOS 27 or iOS 27");
+#if TARGET_OS_OSX
+  NSString* platform = @"macOS";
+#elif TARGET_OS_IOS
+  NSString* platform = @"iOS";
+#else
+  NSString* platform = @"unsupported";
+#endif
+  if (architecture == nil) {
+    architecture = ETCoreAIDeviceArchitectureName();
+  }
+  auto selected = select_assets(manifest, architecture, platform);
+  if (!selected.ok())
+    return selected.error();
+  return RuntimeAssets{std::move(selected.get()), platform, architecture};
+}
+
 Result<id<ETCoreAIPreparedModel>> acquire_bookmark_model(
     const Manifest& selected,
     const runtime::NamedDataMap* named_data,
@@ -154,19 +185,6 @@ Result<id<ETCoreAIPreparedModel>> acquire_bookmark_model(
       write_bookmark(*locked.get(), [model.get() copyBookmarkData]));
   cleanup_source(*locked.get());
   return model;
-}
-
-Error evict_bookmark_model(NSString* root, NSString* key,
-                           id<ETCoreAIModelLoading> loader) {
-  ET_CHECK_OR_RETURN_ERROR(loader != nil, InvalidArgument,
-                           "Missing Core AI model loader");
-  auto locked = lock_bookmark(root, key);
-  if (!locked.ok()) return locked.error();
-  auto bookmark = read_bookmark(*locked.get());
-  if (!bookmark.ok()) return bookmark.error();
-  if (bookmark.get() == nil) return Error::Ok;
-  ET_CHECK_OK_OR_RETURN_ERROR(evict_one(loader, bookmark.get()));
-  return remove_bookmark(*locked.get());
 }
 
 Error clear_bookmark_assets(NSString* root, NSString* key,

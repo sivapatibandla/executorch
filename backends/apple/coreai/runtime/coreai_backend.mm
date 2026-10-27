@@ -12,7 +12,6 @@
 #import "coreai_load_coordinator.h"
 #import "coreai_storage.h"
 
-#include <TargetConditionals.h>
 #include <executorch/runtime/backend/interface.h>
 #include <executorch/runtime/core/exec_aten/util/tensor_util.h>
 #include <algorithm>
@@ -281,24 +280,11 @@ class CoreAIBackend final : public BackendInterface {
       if (!manifest.ok()) {
         return manifest.error();
       }
-      ET_CHECK_OR_RETURN_ERROR(
-          [NSProcessInfo.processInfo
-              isOperatingSystemAtLeastVersion:manifest->minimum_version],
-          DelegateInvalidCompatibility,
-          "Core AI model requires a newer operating system");
-#if TARGET_OS_OSX
-      NSString* platform = @"macOS";
-#elif TARGET_OS_IOS
-      NSString* platform = @"iOS";
-#else
-      NSString* platform = @"unsupported";
-#endif
-      NSString* architecture = ETCoreAIDeviceArchitectureName();
-      auto selected = select_assets(manifest.get(), architecture, platform);
+      auto selected = select_runtime_assets(manifest.get());
       if (!selected.ok()) {
         return selected.error();
       }
-      manifest.get() = std::move(selected.get());
+      manifest.get() = std::move(selected->manifest);
       auto assets_option = path_option(context, "coreai_assets_dir");
       if (!assets_option.ok()) {
         return assets_option.error();
@@ -321,8 +307,8 @@ class CoreAIBackend final : public BackendInterface {
           manifest.get(),
           context.get_named_data_map(),
           coreai_assets_dir,
-          platform,
-          architecture,
+          selected->platform,
+          selected->architecture,
           loader);
       if (!prepared.ok()) {
         return prepared.error();
